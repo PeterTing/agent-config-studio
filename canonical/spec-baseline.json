@@ -1,0 +1,80 @@
+{
+  "specs": {
+    "https://claude.com/blog/the-new-rules-of-context-engineering-for-claude-5-generation-models": {
+      "hash": "05e84a74623aa5dbff1a44ebb6a3f63e",
+      "recorded_at": "2026-07-27T07:33:22+00:00",
+      "rules": [
+        "CB002",
+        "CB003",
+        "CB004",
+        "CB005",
+        "CB006",
+        "HK003",
+        "IN004",
+        "IN005",
+        "IN007",
+        "IN009",
+        "IN010",
+        "MR001",
+        "MR002",
+        "WF003"
+      ]
+    },
+    "https://code.claude.com/docs/en/hooks": {
+      "hash": "61a7ed6d7f458207ed1c5adb5bb9c173",
+      "recorded_at": "2026-07-27T07:33:22+00:00",
+      "rules": [
+        "HK001",
+        "HK002",
+        "HK004",
+        "HK005"
+      ]
+    },
+    "https://code.claude.com/docs/en/memory": {
+      "hash": "791c30eac30d53867fbbc3301e1b9017",
+      "recorded_at": "2026-07-27T07:33:22+00:00",
+      "rules": [
+        "IN001",
+        "IN006",
+        "IN008",
+        "MR003",
+        "WF001",
+        "WF002",
+        "WF004"
+      ]
+    },
+    "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices": {
+      "hash": "e1a565a9735085f5bee380f362a46700",
+      "recorded_at": "2026-07-27T07:33:22+00:00",
+      "rules": [
+        "CB001",
+        "SK001",
+        "SK002",
+        "SK003",
+        "SK004",
+        "SK005",
+        "SK006",
+        "SK007",
+        "SK008",
+        "SK009",
+        "SK010",
+        "SK011",
+        "SK012",
+        "SK013",
+        "SK014",
+        "SK015",
+        "WF005"
+      ]
+    },
+    "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5": {
+      "hash": "80481252dbb55dadb4f4ddc1ec69c16b",
+      "recorded_at": "2026-07-27T07:33:22+00:00",
+      "rules": [
+        "IN002",
+        "IN003"
+      ]
+    }
+  },
+  "updated_at": "2026-07-27T07:33:22+00:00",
+  "note": "Hashes of the documents each rule cites. `studio specs check` compares against these; a difference means the guidance moved and the rules that depend on it should be re-read. Never updated automatically - accepting a new baseline is a statement that you have reviewed the change."
+}

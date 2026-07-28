@@ -1,0 +1,1030 @@
+/* Dashboard controller. Read-only against the loopback API. */
+
+import { createForceGraph } from '/static/vendor/forcegraph.js';
+import {
+  num,
+  shortPath,
+  escapeHtml,
+  metaBreakdownHtml,
+  trendHtml,
+  actionLabelHtml,
+  whyNotBlockingHtml,
+  howtoHtml,
+  catalogueCard,
+  updateConfirmHtml,
+  updateRunningHtml,
+  updateResultHtml,
+  legendHtml,
+} from '/static/render.js';
+
+const $ = (id) => document.getElementById(id);
+const state = { summary: null, health: null, graph: null, inventory: null, updates: null, history: [], fixes: null };
+
+const NODE_COLORS = {
+  instruction: '#c0392b',
+  skill: '#3d6fd6',
+  workflow: '#2f7d4f',
+  command: '#b8791f',
+  agent: '#7b5ea7',
+  hook: '#c85a9c',
+  plugin: '#5a8f9c',
+  canonical: '#8a8781',
+};
+
+const EDGE_LABELS = {
+  references: '引用檔案',
+  invokes: '呼叫',
+  mirror: '宣告的鏡像',
+  generated_from: '由此產生',
+  duplicate: '未宣告的重複',
+  provides: 'plugin 提供',
+  collision: '命名衝突',
+};
+
+/* ---------------- utilities ---------------- */
+
+let session = { token: null, allow_actions: false };
+
+/* Write actions carry the session token. A cross-origin page cannot read
+ * /api/session (CORS blocks the response), so it cannot forge one. */
+async function action(path, body) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Studio-Token': session.token || '' },
+    body: JSON.stringify(body || {}),
+  });
+}
+
+async function api(path, opts) {
+  // Every request from this page carries the session token. Gating an endpoint
+  // and forgetting its caller is how the health button started returning 403;
+  // attaching it once here means a newly gated route cannot silently break the
+  // page. It is same-origin, so this costs nothing and leaks nothing.
+  const o = { ...(opts || {}) };
+  o.headers = { ...(o.headers || {}), 'X-Studio-Token': session.token || '' };
+  const res = await fetch(path, o);
+  const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok || body.error) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+function showError(msg) {
+  const el = $('error');
+  if (!msg) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.textContent = msg;
+}
+
+
+function table(el, columns, rows) {
+  const head = `<thead><tr>${columns.map((c) => `<th>${c.label}</th>`).join('')}</tr></thead>`;
+  const body = rows.length
+    ? rows
+        .map(
+          (r) =>
+            `<tr>${columns
+              .map((c) => `<td class="${c.cls || ''}">${c.get(r) ?? ''}</td>`)
+              .join('')}</tr>`,
+        )
+        .join('')
+    : `<tr><td colspan="${columns.length}" class="muted">沒有資料</td></tr>`;
+  el.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+/* ---------------- tabs ---------------- */
+
+$('tabs').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-tab]');
+  if (!btn) return;
+  for (const b of $('tabs').querySelectorAll('button')) {
+    const on = b === btn;
+    b.setAttribute('aria-selected', String(on));
+    $(`tab-${b.dataset.tab}`).hidden = !on;
+  }
+  if (btn.dataset.tab === 'graph') graph.kick(0.4);
+});
+
+/* ---------------- overview ---------------- */
+
+/* Translate the verdict into the one thing a reader actually wants: do I need
+ * to do something? Raw counts did not answer that - "important 1" sitting next
+ * to "blocking 0" reads as a contradiction unless you already know that
+ * vendor-owned findings never block. */
+function renderStatus() {
+  const h = state.health || {};
+  const c = h.counts || {};
+  const blocking = c.blocking ?? null;
+  const el = $('status');
+  const mark = $('status-mark');
+  const title = $('status-title');
+  const line = $('status-line');
+  const actions = $('status-actions');
+
+  if (blocking === null) {
+    el.className = 'status unknown';
+    mark.textContent = '–';
+    title.textContent = '尚未健檢';
+    line.textContent = '按右上角「執行健檢」。';
+    actions.innerHTML = '';
+    return;
+  }
+
+  const items = [];
+  const u = state.updates;
+  const updateCount = u ? (u.summary.updates_available || 0) + (u.summary.toolkit_updates_available || 0) : null;
+
+  if (blocking > 0) {
+    el.className = 'status unhealthy';
+    mark.textContent = '✕';
+    title.textContent = `不健康 — 有 ${blocking} 項需要你處理`;
+    line.textContent = '這些是你自己的設定裡、會實際影響 agent 行為的問題。';
+    items.push('到「合規問題」分頁，勾選<b>只看阻斷性</b>，每一條都附了修法與官方依據。');
+  } else {
+    el.className = 'status healthy';
+    mark.textContent = '✓';
+    title.textContent = '健康 — 沒有任何需要你動手的項目';
+    line.textContent = '你的設定符合目前的官方指引。以下數字都不是待辦事項：';
+  }
+
+  if (c.vendor_owned) {
+    items.push(
+      `<b>${c.vendor_owned} 個 vendor</b>：來自 plugin 或工具組。改了會被下次升級覆蓋，` +
+        '所以不算你的問題 —— 能做的是升級、移除，或記錄豁免。',
+    );
+  }
+  const minorLocal = (c.minor || 0) - (c.vendor_owned || 0);
+  if (minorLocal > 0) {
+    items.push(`<b>${minorLocal} 個 minor</b>：可以改善但不影響運作的建議，例如沒在用的 plugin、殘留備份檔。`);
+  }
+  if (c.waived) {
+    items.push(`<b>${c.waived} 個已豁免</b>：你明確記錄過理由、決定不修的項目。`);
+  }
+  if (updateCount === null) {
+    items.push('雲端更新<b>尚未檢查</b> —— 到「套件與更新」分頁按一下就會比對。');
+  } else if (updateCount > 0) {
+    items.push(`<b>${updateCount} 個可用更新</b>，詳見「套件與更新」分頁。`);
+  }
+  actions.innerHTML = items.map((s) => `<li>${s}</li>`).join('');
+}
+
+function renderOverview() {
+  const s = state.summary || {};
+  const h = state.health || {};
+  const counts = h.counts || s.counts || {};
+  const meta = (h.metrics || {}).preloaded_skill_metadata || {};
+
+  $('roots').textContent = s.roots ? `· ${shortPath(s.roots.claude)} + ${shortPath(s.roots.codex)}` : '';
+  const verdict = h.verdict || s.verdict || 'UNKNOWN';
+  const vEl = $('verdict');
+  vEl.textContent = verdict;
+  vEl.className = `verdict ${verdict === 'PASS' ? 'pass' : verdict === 'FAIL' ? 'fail' : 'unknown'}`;
+  $('stamp').textContent = h.generated_at || s.last_report_at || '';
+
+  renderStatus();
+
+  $('m-blocking').textContent = num(counts.blocking ?? 0);
+  $('m-meta').innerHTML = `${num(meta.total_est_tokens)}<small> tokens</small>`;
+  $('m-meta-sub').textContent = meta.avoidable_est_tokens
+    ? `其中 ${num(meta.avoidable_est_tokens)} tokens 來自沒在用、也沒被你的設定引用的 plugin`
+    : '沒有可避免的浪費';
+
+  const instr = (h.metrics || {}).instruction_files || s.instruction_files || [];
+  $('m-instr').textContent = instr.length ? instr.map((i) => i.lines).join(' / ') : '–';
+
+  const u = state.updates;
+  if (u) {
+    const n = (u.summary.updates_available || 0) + (u.summary.toolkit_updates_available || 0);
+    $('m-updates').textContent = num(n);
+    $('m-updates-sub').textContent = `已比對 ${u.summary.checked} 個 plugin、${u.summary.toolkits_checked} 個工具組；${u.summary.unknown} 個無法比對`;
+    $('tab-updates-count').textContent = n ? `(${n})` : '';
+  }
+
+  $('tab-findings-count').textContent = counts.blocking ? `(${counts.blocking})` : '';
+
+  // Explain each number instead of listing it. Ordered by whether it is yours.
+  const minorLocal = (counts.minor || 0) - (counts.vendor_owned || 0);
+  const rows = [
+    {
+      k: '需要你處理',
+      n: counts.blocking || 0,
+      why: '你自己的設定裡，會影響 agent 行為的問題。這個數字是唯一的合格判準。',
+      cls: (counts.blocking || 0) > 0 ? 'critical' : 'ok',
+    },
+    {
+      k: 'vendor（不是你的）',
+      n: counts.vendor_owned || 0,
+      why: 'plugin / 工具組帶進來的。手改會被升級覆蓋，所以不列入判準。',
+      cls: 'vendor',
+    },
+    {
+      k: 'minor（可選改善）',
+      n: minorLocal > 0 ? minorLocal : 0,
+      why: '不影響運作的建議：沒在用的 plugin、殘留備份、reference 檔缺目錄。',
+      cls: 'minor',
+    },
+    {
+      k: '已豁免',
+      n: counts.waived || 0,
+      why: '你記錄過理由、決定不修的。豁免是留在紀錄上的決定，不是把它靜音。',
+      cls: 'ok',
+    },
+  ];
+  table(
+    $('tbl-breakdown'),
+    [
+      { label: '類別', get: (r) => `<span class="tag ${r.cls}">${escapeHtml(r.k)}</span>` },
+      { label: '數量', cls: 'num', get: (r) => num(r.n) },
+      { label: '這代表什麼', get: (r) => `<span class="detail-text">${escapeHtml(r.why)}</span>` },
+    ],
+    rows,
+  );
+
+  $('meta-breakdown').innerHTML = metaBreakdownHtml(
+    (h.metrics || {}).preloaded_skill_metadata,
+    (h.inventory_counts || {}).skills,
+  );
+  const trend = trendHtml(state.history);
+  $('trend-wrap').innerHTML = trend.chart;
+  $('trend-sub').innerHTML = trend.caption;
+
+  const cov = h.usage || {};
+  $('coverage').innerHTML = cov.available
+    ? renderCoverage(cov)
+    : '<span class="muted">這份報告沒有使用量索引，因此「沒在用」的判斷被跳過而不是猜測。</span>';
+}
+
+/* ----- 預載 metadata：這些 token 是什麼、能不能省 ----- */
+
+function renderCoverage(cov) {
+  return cov.available
+    ? `<div class="sub" style="margin:0 0 8px">「這個 plugin 有沒有在用」是從你的完整歷史算出來的，不是猜的。覆蓋率不足時相關判斷會被跳過。</div>
+       <dl style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0;font-size:12.5px">
+         <dt class="muted">覆蓋率</dt><dd class="mono">${cov.file_coverage_pct}% （${num(cov.files_read)} / ${num(cov.transcripts_total)} 個 transcript，${(cov.bytes_read / 1e9).toFixed(1)} GB）</dd>
+         <dt class="muted">skill 呼叫</dt><dd class="mono">${num(cov.total_invocations)}</dd>
+         <dt class="muted">MCP tool 呼叫</dt><dd class="mono">${num(cov.mcp_tool_calls)}</dd>
+         <dt class="muted">subagent 啟動</dt><dd class="mono">${num(cov.agent_spawns)}</dd>
+         <dt class="muted">Codex tool 呼叫</dt><dd class="mono">${num(cov.codex_tool_calls)}</dd>
+         <dt class="muted">是否截斷</dt><dd class="mono">${cov.truncated ? '是（結論不可用於停用決策）' : '否'}</dd>
+       </dl>`
+    : '<span class="muted">這份報告沒有使用量索引，因此「沒在用」的判斷被跳過而不是猜測。</span>';
+}
+
+/* ---------------- findings ---------------- */
+
+function renderFindings() {
+  const all = (state.health || {}).findings || [];
+  const sev = $('f-sev').value;
+  const owner = $('f-owner').value;
+  const cat = $('f-cat').value;
+  const onlyBlocking = $('f-blocking').checked;
+  const q = $('f-search').value.trim().toLowerCase();
+
+  const cats = [...new Set(all.map((f) => f.category).filter(Boolean))];
+  if (cats.length && $('f-cat').options.length === 1) {
+    for (const c of cats.sort()) {
+      const o = document.createElement('option');
+      o.value = o.textContent = c;
+      $('f-cat').append(o);
+    }
+  }
+
+  const rows = all.filter((f) => {
+    if (sev && f.severity !== sev) return false;
+    if (owner && f.owner !== owner) return false;
+    if (cat && f.category !== cat) return false;
+    if (onlyBlocking && (f.waived || f.owner !== 'local' || f.severity === 'minor')) return false;
+    if (q) {
+      const hay = `${f.rule} ${f.path} ${f.detail} ${f.title}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  $('f-stats').textContent = `${rows.length} / ${all.length}`;
+  table(
+    $('tbl-findings'),
+    [
+      { label: '規則', cls: 'mono nowrap', get: (f) => `<a href="${f.spec}" target="_blank" rel="noreferrer">${f.rule}</a>` },
+      {
+        label: '要不要處理',
+        get: (f) => actionLabelHtml(f),
+      },
+      {
+        label: '嚴重度',
+        get: (f) =>
+          `<span class="tag ${f.severity}">${f.severity}</span>` +
+          (f.owner === 'vendor' ? ' <span class="tag vendor">vendor</span>' : ''),
+      },
+      { label: '位置', cls: 'mono', get: (f) => escapeHtml(shortPath(f.location || f.path)) },
+      {
+        label: '說明',
+        get: (f) =>
+          `<div class="detail-text">${escapeHtml(f.detail)}</div>` +
+          (f.remedy ? `<div class="remedy"><b>修法：</b>${escapeHtml(f.remedy)}</div>` : '') +
+          (f.waiver_reason ? `<div class="remedy"><b>豁免理由：</b>${escapeHtml(f.waiver_reason)}</div>` : '') +
+          whyNotBlockingHtml(f),
+      },
+      {
+        label: '動作',
+        get: (f) => {
+          const info = ((state.fixes || {}).fixes || {})[f.key];
+          if (!info) return '';
+          if (!info.fixable) {
+            return `<span class="muted" style="font-size:11.5px" title="${escapeHtml(info.why)}">需人工判斷</span>`;
+          }
+          const dis = session.allow_actions ? '' : 'disabled';
+          return `<button data-fixkey="${escapeHtml(f.key)}" ${dis} title="${escapeHtml(info.detail)}">${escapeHtml(info.label)}</button>`;
+        },
+      },
+    ],
+    rows,
+  );
+
+  $('tbl-findings').onclick = async (ev) => {
+    const btn = ev.target.closest('button[data-fixkey]');
+    if (!btn) return;
+    const cell = btn.closest('td');
+    const row = btn.closest('tr');
+    btn.disabled = true;
+    // 修完會整表重畫，被點的那列通常就消失了。先把結果釘在畫面上，
+    // 不然使用者只會看到列不見、沒有任何說明。
+    cell.innerHTML = '<span class="running"><span class="spin"></span>修復中…</span>';
+    try {
+      const r = await runFix([btn.dataset.fixkey], false);
+      if (row) row.classList.add('fixed-row');
+      pinResult(
+        `<b>✓ 已修復 ${r.applied} 項</b>
+         <div>備份還原點 <code class="mono">${escapeHtml(r.backup || '')}</code> ——
+         按錯了到 <b>同步狀態</b> 分頁最下面按「還原」。</div>
+         <div class="sub">下表已重新掃描，修好的項目會從列表消失。</div>`,
+        'ok',
+      );
+      await loadAll(true);
+    } catch (e) {
+      pinResult(`<b>✕ 修復失敗</b><div>${escapeHtml(e.message)}</div>`, 'bad');
+      cell.innerHTML = '';
+      btn.disabled = false;
+      cell.appendChild(btn);
+    }
+  };
+}
+
+/** 釘一張結果卡在 findings 表格正上方，不會自己消失，也不需要捲到頁首才看得到。 */
+function pinResult(html, kind) {
+  const host = $('fix-result');
+  host.hidden = false;
+  host.className = `panel result ${kind}`;
+  host.innerHTML = `<div class="body">${html}<button class="dismiss" type="button">知道了</button></div>`;
+  host.querySelector('.dismiss').onclick = () => {
+    host.hidden = true;
+  };
+  host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+for (const id of ['f-sev', 'f-owner', 'f-cat', 'f-blocking', 'f-search']) {
+  $(id).addEventListener('input', renderFindings);
+}
+
+/* ---------------- fixes ---------------- */
+
+async function loadFixes() {
+  try {
+    state.fixes = await api('/api/fixes');
+  } catch {
+    state.fixes = null;
+  }
+  const s = state.fixes;
+  const bar = $('fix-stats');
+  const applyBtn = $('btn-fix-apply');
+  if (!s) {
+    bar.textContent = '';
+    return;
+  }
+  const n = s.auto_fixable_count;
+  bar.innerHTML =
+    `<b>${n}</b> 項可一鍵修復` +
+    (s.individual_count ? ` · ${s.individual_count} 項只能單獨決定（下表的按鈕）` : '') +
+    (session.allow_actions
+      ? ''
+      : ' · 唯讀模式，用 <code class="mono">serve --allow-actions</code> 啟動才能按');
+  applyBtn.disabled = !n || !session.allow_actions;
+  // Preview posts to /api/actions/fix, which always goes through the write
+  // gate - so in read-only mode an enabled button only ever produced a 403.
+  $('btn-fix-preview').disabled = !n || !session.allow_actions;
+  renderFindings();
+}
+
+async function runFix(keys, dryRun) {
+  return action('/api/actions/fix', { keys: keys || [], dry_run: !!dryRun });
+}
+
+$('btn-fix-preview').addEventListener('click', async () => {
+  const b = $('btn-fix-preview');
+  b.disabled = true;
+  b.textContent = '產生中…';
+  try {
+    const r = await runFix([], true);
+    $('fix-preview-panel').hidden = false;
+    $('fix-preview').innerHTML = renderDiff(r.diff || '') +
+      (r.remove_dirs && r.remove_dirs.length ? `\n\n刪除空目錄：\n${r.remove_dirs.join('\n')}` : '');
+  } catch (e) {
+    showError(`預覽失敗：${e.message}`);
+  } finally {
+    b.disabled = false;
+    b.textContent = '預覽可一鍵修復的變更';
+  }
+});
+
+$('btn-fix-apply').addEventListener('click', async () => {
+  const n = (state.fixes || {}).auto_fixable_count || 0;
+  if (!window.confirm(`套用 ${n} 項自動修復？\n每個檔案都會先備份，可從「同步狀態」分頁還原。`)) return;
+  const b = $('btn-fix-apply');
+  b.disabled = true;
+  b.textContent = '修復中…';
+  try {
+    const r = await runFix([], false);
+    await loadAll(true);
+    alertPanel(`已修復 ${r.applied} 項；還原點 ${r.backup}`);
+  } catch (e) {
+    showError(`修復失敗：${e.message}`);
+  } finally {
+    b.disabled = false;
+    b.textContent = '一鍵修復';
+  }
+});
+
+/* ---------------- graph ---------------- */
+
+let lastCounts = { nodes: 0, edges: 0 };
+
+function updateGraphStats() {
+  const { nodes, edges } = lastCounts;
+  let msg = `${nodes} 節點 / ${edges} 連線 · 紅圈＝有阻斷性問題`;
+  if (labelStats) {
+    msg += ` · 標籤 ${labelStats.shown}/${labelStats.total}（重疊的自動隱藏，放大可看更多）`;
+  }
+  if (nodes > 260) {
+    msg += ' · 節點很多，建議用左側篩選或勾「只看有連線的」';
+  }
+  const el = $('g-stats');
+  if (el) el.textContent = msg;
+}
+
+const graph = createForceGraph($('graph'), {
+  color: (n) => NODE_COLORS[n.kind] || '#888',
+  radius: (n) => {
+    if (n.kind === 'instruction') return 10;
+    if (n.kind === 'plugin') return 5 + Math.min(6, (n.skill_count || 0) / 6);
+    if (n.kind === 'skill') return 4 + Math.min(5, (n.body_lines || 0) / 130);
+    return 6;
+  },
+  flag: (n) => flaggedPaths.has(n.path),
+});
+
+let flaggedPaths = new Set();
+
+let labelStats = null;
+graph.on('labels', (s) => {
+  labelStats = s;
+  updateGraphStats();
+});
+
+graph.on('select', (n) => {
+  const el = $('detail');
+  if (!n) {
+    el.innerHTML = '<div class="empty">點一個節點看它的關聯。滾輪縮放，拖曳平移。</div>';
+    return;
+  }
+  const g = state.graph || { edges: [] };
+  const rel = g.edges.filter((e) => e.source === n.id || e.target === n.id);
+  const findings = ((state.health || {}).findings || []).filter((f) => f.path === n.path);
+  const fields = Object.entries(n)
+    .filter(([k, v]) => !['id', 'label', 'kind'].includes(k) && v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v)}</dd>`)
+    .join('');
+  const relHtml = rel.length
+    ? rel
+        .map((e) => {
+          const other = e.source === n.id ? e.target : e.source;
+          const node = g.nodes.find((x) => x.id === other);
+          const dir = e.source === n.id ? '→' : '←';
+          return `<li><span class="tag">${EDGE_LABELS[e.kind] || e.kind}</span> ${dir} ${escapeHtml(node ? node.label : other)}</li>`;
+        })
+        .join('')
+    : '<li class="muted">沒有連線</li>';
+  el.innerHTML =
+    `<div style="font-weight:650;margin-bottom:6px">${escapeHtml(n.label)} <span class="tag">${n.kind}</span></div>` +
+    `<dl>${fields}</dl>` +
+    `<h3 style="margin:12px 0 4px;font-size:11px;text-transform:uppercase;color:var(--ink-3)">關聯 (${rel.length})</h3>` +
+    `<ul style="margin:0;padding-left:16px;font-size:12px">${relHtml}</ul>` +
+    (findings.length
+      ? `<h3 style="margin:12px 0 4px;font-size:11px;text-transform:uppercase;color:var(--ink-3)">此檔的問題 (${findings.length})</h3>` +
+        `<ul style="margin:0;padding-left:16px;font-size:12px">${findings
+          .map((f) => `<li><span class="tag ${f.severity}">${f.rule}</span> ${escapeHtml(f.title)}</li>`)
+          .join('')}</ul>`
+      : '');
+});
+
+function renderGraph() {
+  const g = state.graph;
+  if (!g) return;
+  const kind = $('g-kind').value;
+  const runtime = $('g-runtime').value;
+  const onlyConnected = $('g-connected').checked;
+  const q = $('g-search').value.trim().toLowerCase();
+
+  let nodes = g.nodes.filter((n) => {
+    if (kind && n.kind !== kind) return false;
+    if (runtime && n.runtime !== runtime) return false;
+    if (q && !String(n.label).toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const ids = new Set(nodes.map((n) => n.id));
+  let edges = g.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
+  if (onlyConnected) {
+    const linked = new Set(edges.flatMap((e) => [e.source, e.target]));
+    nodes = nodes.filter((n) => linked.has(n.id));
+  }
+
+  flaggedPaths = new Set(
+    ((state.health || {}).findings || [])
+      .filter((f) => !f.waived && f.owner === 'local' && f.severity !== 'minor')
+      .map((f) => f.path),
+  );
+
+  graph.render({ nodes, edges });
+  lastCounts = { nodes: nodes.length, edges: edges.length };
+  updateGraphStats();
+
+  $('legend').innerHTML = legendHtml(
+    [...new Set(g.nodes.map((n) => n.kind))].sort(),
+    g.edges.map((e) => e.kind),
+    NODE_COLORS,
+    EDGE_LABELS,
+  );
+}
+
+for (const id of ['g-kind', 'g-runtime', 'g-connected', 'g-search']) {
+  $(id).addEventListener('input', renderGraph);
+}
+$('g-expand').addEventListener('change', () => loadGraph($('g-expand').checked));
+$('g-reset').addEventListener('click', () => graph.reset());
+
+async function loadGraph(expand = false) {
+  state.graph = await api(`/api/graph?expand=${expand ? 1 : 0}`);
+  renderGraph();
+}
+
+/* ---------------- plugins & updates ---------------- */
+
+function renderPlugins() {
+  const u = state.updates;
+  const plugins = u ? u.plugins : ((state.inventory || {}).plugins || []).map((p) => ({ ...p, note: '' }));
+
+  table(
+    $('tbl-toolkits'),
+    [
+      { label: '名稱', cls: 'mono', get: (t) => escapeHtml(t.name) },
+      { label: '狀態', get: (t) => (t.update_available ? '<span class="tag important">有更新</span>' : t.update_available === false ? '<span class="tag ok">最新</span>' : '<span class="tag minor">未知</span>') },
+      { label: '本機版本', cls: 'mono', get: (t) => escapeHtml(t.local_version || t.commit?.slice(0, 8) || '?') },
+      { label: '遠端版本', cls: 'mono', get: (t) => escapeHtml(t.remote_version || '?') },
+      { label: '管理的 skill', cls: 'num', get: (t) => t.manages_count },
+      { label: '說明', get: (t) => `<span class="detail-text">${escapeHtml(t.note || '')}</span>` },
+    ],
+    (u ? u.toolkits : (state.inventory || {}).toolkits) || [],
+  );
+
+  table(
+    $('tbl-plugins'),
+    [
+      { label: 'Plugin', cls: 'mono', get: (p) => escapeHtml(p.key) },
+      { label: 'Runtime', get: (p) => `<span class="tag">${p.runtime}</span>` },
+      { label: '啟用', get: (p) => (p.enabled ? '<span class="tag ok">是</span>' : '<span class="tag minor">否</span>') },
+      { label: 'Skills', cls: 'num', get: (p) => p.skill_count ?? 0 },
+      { label: '更新', get: (p) => (p.update_available ? '<span class="tag important">有更新</span>' : p.update_available === false ? '<span class="tag ok">最新</span>' : '<span class="tag minor">未知</span>') },
+      { label: '說明', get: (p) => `<span class="detail-text">${escapeHtml(p.note || p.update_note || '')}</span>` },
+    ],
+    plugins.slice().sort((a, b) => Number(b.enabled) - Number(a.enabled) || (b.skill_count || 0) - (a.skill_count || 0)),
+  );
+
+  if (u) {
+    $('u-stats').textContent = `${u.summary.updates_available} 個 plugin 與 ${u.summary.toolkit_updates_available} 個工具組有更新；${u.summary.unknown} 個無法比對（誠實標為未知，不當成最新）`;
+  }
+
+  // Updates run each package's own updater. The tool never reimplements one.
+  const plan = (u && u.plan) || [];
+  $('update-howto').innerHTML = plan.length
+    ? `<div class="sub" style="margin:0 0 10px">更新一律呼叫套件自己的更新器：plugin 走 <code class="mono">claude plugin update</code>，git checkout 的工具組走它文件寫的 git 升級序列。本工具不自己實作套件管理。</div>` +
+      plan
+        .map(
+          (i) => `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--line)">
+            <div style="flex:1 1 auto;min-width:0">
+              <b>${escapeHtml(i.target)}</b> <span class="tag">${i.kind}</span><br>
+              <span class="mono" style="font-size:12px">${escapeHtml(String(i.from))} → ${escapeHtml(String(i.to))}</span>
+              ${i.manages ? `<span class="muted" style="font-size:12px"> · 管理 ${i.manages} 個 skill</span>` : ''}
+              <div class="sub" style="margin-top:2px"><code class="mono">${escapeHtml(i.method)}</code></div>
+            </div>
+            <div class="nowrap">${
+              i.automatic
+                ? `<button data-update="${escapeHtml(i.root ? `${i.target}@${i.root}` : i.target)}" class="primary" ${
+                    session.allow_actions ? '' : 'disabled title="唯讀模式：用 --allow-actions 啟動才能按"'
+                  }>更新</button>`
+                : '<span class="muted" style="font-size:12px">需手動</span>'
+            }</div>
+          </div>
+          <div data-rowstate="${escapeHtml(i.root ? `${i.target}@${i.root}` : i.target)}"></div>`,
+        )
+        .join('') +
+      `<div class="sub" style="margin-top:10px">plugin 更新後 Claude Code 需重啟才會套用。工具組升級會先記下目前的 commit，失敗時可用它回退。</div>`
+    : '<span class="muted">目前沒有偵測到可用更新。到上方按「檢查雲端更新」。</span>';
+
+  $('update-howto').onclick = (ev) => {
+    const go = ev.target.closest('button[data-go]');
+    if (go) return runUpdate(go.dataset.go);
+    const no = ev.target.closest('button[data-cancel]');
+    if (no) return setRowState(no.dataset.cancel, '');
+    const btn = ev.target.closest('button[data-update]');
+    if (!btn) return;
+    // 用頁內確認，不用 window.confirm：瀏覽器對話框會擋住整頁，也看不出後面在跑什麼。
+    const t = btn.dataset.update;
+    setRowState(
+      t,
+      `<div class="confirm">
+         <b>要更新 ${escapeHtml(t)} 嗎？</b>
+         這會執行該套件自己的更新器，過程可能要 <b>數十秒到數分鐘</b>，期間這一列會顯示進度。
+         <div class="row"><button data-go="${escapeHtml(t)}" class="primary">確定更新</button>
+         <button data-cancel="${escapeHtml(t)}">取消</button></div>
+       </div>`,
+    );
+  };
+}
+
+/** 把某一列的狀態區塊換掉。列在 renderPlugins 重畫後仍能對上，因為是用 target 當 key。 */
+function setRowState(target, html) {
+  const el = document.querySelector(`[data-rowstate="${CSS.escape(target)}"]`);
+  if (el) el.innerHTML = html;
+}
+
+async function runUpdate(target) {
+  const started = Date.now();
+  let done = false;
+  // 有進度才知道它在跑。沒有這個，長時間的升級看起來就跟當掉一樣。
+  const tick = () => {
+    if (done) return;
+    const s = Math.round((Date.now() - started) / 1000);
+    setRowState(target, updateRunningHtml(target, s));
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+
+  try {
+    const r = await action('/api/actions/update', { target });
+    const res = (r.results || [])[0] || {};
+    const secs = Math.round((Date.now() - started) / 1000);
+    done = true;
+    clearInterval(timer);
+    setRowState(
+      target,
+      `<div class="result ${res.ok ? 'ok' : 'bad'}">
+         <b>${res.ok ? '✓ 更新完成' : '✕ 更新失敗'}</b>（耗時 ${secs}s）
+         <div>${escapeHtml(res.message || '沒有回傳訊息')}</div>
+         ${res.needs_restart ? '<div class="warn">要<b>重開 Claude Code</b> 才會套用。</div>' : ''}
+         ${res.restore_hint ? `<div class="sub">要回退：<code class="mono">${escapeHtml(res.restore_hint)}</code></div>` : ''}
+         ${
+           (res.steps || []).length
+             ? `<details><summary>看它實際執行了什麼（${res.steps.length} 步）</summary>
+                <pre class="steps">${escapeHtml(
+                  res.steps
+                    .map((s) => `$ ${s.cmd}\n  rc=${s.rc}${s.stderr ? '\n  ' + String(s.stderr).slice(0, 500) : ''}`)
+                    .join('\n\n'),
+                )}</pre></details>`
+             : ''
+         }
+       </div>`,
+    );
+    state.updates = await api('/api/updates?fresh=1');
+    renderOverview();
+  } catch (e) {
+    done = true;
+    clearInterval(timer);
+    setRowState(target, `<div class="result bad"><b>✕ 更新失敗</b><div>${escapeHtml(e.message)}</div></div>`);
+  }
+}
+
+$('btn-updates').addEventListener('click', async () => {
+  const b = $('btn-updates');
+  b.disabled = true;
+  b.textContent = '檢查中…';
+  try {
+    state.updates = await api('/api/updates?fresh=1');
+    renderPlugins();
+    renderOverview();
+  } catch (e) {
+    showError(`更新檢查失敗：${e.message}`);
+  } finally {
+    b.disabled = false;
+    b.textContent = '檢查雲端更新';
+  }
+});
+
+/* ---------------- inventory ---------------- */
+
+function renderInventory() {
+  const inv = state.inventory;
+  if (!inv) return;
+  const kind = $('i-kind').value;
+  const origin = $('i-origin').value;
+  const q = $('i-search').value.trim().toLowerCase();
+  const cards = $('i-cards').checked;
+
+  $('i-howto').innerHTML = howtoHtml(kind);
+
+  $('i-origin').disabled = kind !== 'skills';
+  $('i-cards-panel').hidden = !cards;
+  $('i-table-panel').hidden = cards;
+
+  let rows = inv[kind] || [];
+  if (kind === 'skills' && origin === 'usable') {
+    rows = rows.filter((r) => r.origin !== 'orphan-library');
+  } else if (kind === 'skills' && origin) {
+    rows = rows.filter((r) => r.origin === origin);
+  }
+  if (q) rows = rows.filter((r) => JSON.stringify(r).toLowerCase().includes(q));
+
+  if (cards) {
+    $('i-stats').textContent = `${rows.length} 筆`;
+    $('cards-inventory').innerHTML = rows.length
+      ? rows
+          .slice()
+          .sort((a, b) => String(a.name || a.path).localeCompare(String(b.name || b.path)))
+          .map((r) => catalogueCard(kind, r))
+          .join('')
+      : '<span class="muted">沒有符合的項目。</span>';
+    return;
+  }
+
+  const columnsFor = {
+    skills: [
+      { label: '名稱', cls: 'mono', get: (r) => escapeHtml(r.name || r.dir_name) },
+      { label: '來源', get: (r) => `<span class="tag">${r.origin}</span>` },
+      { label: 'Runtime', get: (r) => `<span class="tag">${r.runtime}</span>` },
+      { label: 'Body 行數', cls: 'num', get: (r) => (r.body_lines > 500 ? `<span class="tag important">${r.body_lines}</span>` : r.body_lines) },
+      { label: 'Desc 長度', cls: 'num', get: (r) => r.description.length },
+      { label: '路徑', cls: 'mono', get: (r) => escapeHtml(shortPath(r.path)) },
+    ],
+    instructions: [
+      { label: '檔案', cls: 'mono', get: (r) => escapeHtml(shortPath(r.path)) },
+      { label: 'Runtime', get: (r) => `<span class="tag">${r.runtime}</span>` },
+      { label: '行數', cls: 'num', get: (r) => (r.lines > 200 ? `<span class="tag important">${r.lines}</span>` : r.lines) },
+      { label: 'Bytes', cls: 'num', get: (r) => num(r.bytes) },
+    ],
+    workflows: [
+      { label: '檔案', cls: 'mono', get: (r) => escapeHtml(shortPath(r.path)) },
+      { label: 'Runtime', get: (r) => `<span class="tag">${r.runtime}</span>` },
+      { label: '行數', cls: 'num', get: (r) => r.lines },
+    ],
+    commands: [
+      { label: '名稱', cls: 'mono', get: (r) => `/${escapeHtml(r.name)}` },
+      { label: 'Runtime', get: (r) => `<span class="tag">${r.runtime}</span>` },
+      { label: '行數', cls: 'num', get: (r) => r.lines },
+      { label: '路徑', cls: 'mono', get: (r) => escapeHtml(shortPath(r.path)) },
+    ],
+    agents: [
+      { label: '名稱', cls: 'mono', get: (r) => escapeHtml(r.name) },
+      { label: '行數', cls: 'num', get: (r) => r.lines },
+      { label: '路徑', cls: 'mono', get: (r) => escapeHtml(shortPath(r.path)) },
+    ],
+    hooks: [
+      { label: '事件', cls: 'mono', get: (r) => escapeHtml(r.event) },
+      { label: 'Matcher', cls: 'mono', get: (r) => escapeHtml(r.matcher || '*') },
+      { label: 'if 條件', cls: 'mono', get: (r) => escapeHtml(r.if_rule || '（無）') },
+      { label: '注入內容', get: (r) => `<span class="detail-text">${escapeHtml((r.injects || '').slice(0, 160))}</span>` },
+    ],
+  };
+
+  $('i-stats').textContent = `${rows.length} 筆`;
+  table($('tbl-inventory'), columnsFor[kind], rows);
+}
+
+for (const id of ['i-kind', 'i-origin', 'i-search', 'i-cards']) $(id).addEventListener('input', renderInventory);
+
+/* ---------------- sync ---------------- */
+
+function renderDiff(text) {
+  if (!text.trim()) return '<span class="muted">沒有待套用的差異。</span>';
+  return text
+    .split('\n')
+    .map((l) => {
+      const e = escapeHtml(l);
+      if (l.startsWith('+++') || l.startsWith('---') || l.startsWith('@@')) return `<span class="hdr">${e}</span>`;
+      if (l.startsWith('+')) return `<span class="add">${e}</span>`;
+      if (l.startsWith('-')) return `<span class="del">${e}</span>`;
+      return e;
+    })
+    .join('\n');
+}
+
+async function loadSync() {
+  try {
+    const s = await api('/api/sync-preview');
+    $('sync-status').innerHTML =
+      (s.in_sync
+        ? '<span class="tag ok">已同步</span> CLAUDE.md 與 AGENTS.md 都與 canonical 一致。'
+        : `<span class="tag important">有差異</span> ${s.pending.length} 個檔案與 canonical 不一致。`) +
+      (s.errors.length ? `<div class="banner err" style="margin-top:8px">${s.errors.map(escapeHtml).join('<br>')}</div>` : '') +
+      `<div class="sub">要改規則就改 <code>canonical/</code> 底下的來源檔。直接改產生出來的檔案會被規則 MR003 抓到。</div>` +
+      (s.in_sync
+        ? ''
+        : `<div style="margin-top:10px;display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+             <button id="btn-sync-apply" class="primary" ${session.allow_actions ? '' : 'disabled'}>套用同步</button>
+             <span class="muted" style="font-size:12px">${
+               session.allow_actions
+                 ? '會先自動備份，可從下方還原點復原。'
+                 : '唯讀模式。用 <code class="mono">python3 -m studio.cli serve --allow-actions</code> 啟動即可從這裡套用。'
+             }</span>
+           </div>
+           <div class="sub">等同指令：<code class="mono">${escapeHtml(s.apply_command)}</code></div>`) +
+      (s.pending.length
+        ? `<ul style="font-size:12.5px">${s.pending.map((p) => `<li class="mono">${escapeHtml(shortPath(p.path))} <span class="muted">+${p.added} -${p.removed}</span></li>`).join('')}</ul>`
+        : '');
+    $('sync-diff').innerHTML = renderDiff(s.diff || '');
+  } catch (e) {
+    $('sync-status').innerHTML = `<span class="tag critical">錯誤</span> ${escapeHtml(e.message)}`;
+    $('sync-diff').textContent = '';
+  }
+  const applyBtn = $('btn-sync-apply');
+  if (applyBtn) {
+    applyBtn.addEventListener('click', async () => {
+      applyBtn.disabled = true;
+      applyBtn.textContent = '套用中…';
+      try {
+        const r = await action('/api/actions/sync-apply');
+        showError(null);
+        await loadAll(true);
+        alertPanel(`已套用 ${r.applied} 個檔案；還原點 ${r.backup}`);
+      } catch (e) {
+        showError(`套用失敗：${e.message}`);
+      } finally {
+        applyBtn.disabled = false;
+        applyBtn.textContent = '套用同步';
+      }
+    });
+  }
+
+  try {
+    const backups = await api('/api/backups');
+    table(
+      $('tbl-backups'),
+      [
+        { label: '還原點', cls: 'mono', get: (b) => escapeHtml(b.id) },
+        { label: '變更集', get: (b) => escapeHtml(b.change_set || '') },
+        { label: '檔案數', cls: 'num', get: (b) => (b.changes || []).length },
+        { label: '說明', get: (b) => `<span class="detail-text">${escapeHtml(b.description || '')}</span>` },
+        {
+          label: '',
+          get: (b) =>
+            session.allow_actions
+              ? `<button data-rollback="${escapeHtml(b.id)}">還原</button>`
+              : `<span class="muted mono" style="font-size:11px">rollback ${escapeHtml(b.id)}</span>`,
+        },
+      ],
+      backups,
+    );
+    // Assigned, not added: loadSync() runs on load, on refresh and after every
+    // apply, and addEventListener stacked a new handler each time. One click
+    // then fired N concurrent rollbacks of the same backup.
+    $('tbl-backups').onclick = async (ev) => {
+      const btn = ev.target.closest('button[data-rollback]');
+      if (!btn) return;
+      const id = btn.dataset.rollback;
+      // Restoring overwrites live config, so it asks first.
+      if (!window.confirm(`還原 ${id}？\n這會把備份當時的檔案內容寫回 ~/.claude 與 ~/.codex。`)) return;
+      btn.disabled = true;
+      try {
+        const r = await action('/api/actions/rollback', { id });
+        await loadAll(true);
+        alertPanel(`已還原 ${(r.restored || []).length} 個檔案`);
+      } catch (e) {
+        showError(`還原失敗：${e.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  } catch {
+    /* backups are optional */
+  }
+}
+
+function alertPanel(msg) {
+  const el = $('error');
+  el.hidden = false;
+  el.className = 'banner';
+  el.textContent = msg;
+  setTimeout(() => {
+    el.hidden = true;
+    el.className = 'banner err';
+  }, 6000);
+}
+
+/* ---------------- load ---------------- */
+
+async function loadAll(fresh = false) {
+  showError(null);
+  // 重新掃描要好幾秒。沒有這個指示，頁面在這段時間看起來就像沒反應。
+  setBusy(fresh ? '重新掃描設定中…' : '載入中…');
+  try {
+    return await loadAllInner(fresh);
+  } finally {
+    setBusy(null);
+  }
+}
+
+function setBusy(label) {
+  let el = document.getElementById('busy');
+  if (!label) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'busy';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `<span class="spin"></span>${escapeHtml(label)}`;
+}
+
+async function loadAllInner(fresh = false) {
+  try {
+    session = await api('/api/session');
+  } catch {
+    session = { token: null, allow_actions: false };
+  }
+  const q = fresh ? '?fresh=1' : '';
+  const [summary, health, inventory, history] = await Promise.all([
+    api(`/api/summary${q}`),
+    api(`/api/health${q}`),
+    api(`/api/inventory${q}`),
+    api('/api/history'),
+  ]);
+  state.summary = summary;
+  state.health = health;
+  state.inventory = inventory;
+  state.history = history;
+  // Attach rule categories so the findings filter can group by them.
+  try {
+    const rules = await api('/api/rules');
+    const cat = new Map(rules.map((r) => [r.code, r.category]));
+    for (const f of state.health.findings || []) f.category = cat.get(f.rule) || 'other';
+  } catch {
+    /* categories are cosmetic */
+  }
+  renderOverview();
+  renderFindings();
+  renderInventory();
+  renderPlugins();
+  await loadFixes();
+  await loadGraph($('g-expand').checked);
+  loadSync();
+}
+
+$('btn-refresh').addEventListener('click', async () => {
+  const b = $('btn-refresh');
+  b.disabled = true;
+  b.textContent = '掃描中…';
+  try {
+    await loadAll(true);
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    b.disabled = false;
+    b.textContent = '重新掃描';
+  }
+});
+
+$('btn-check').addEventListener('click', async () => {
+  const b = $('btn-check');
+  b.disabled = true;
+  b.textContent = '健檢中（會掃全部歷史，約需 1 分鐘）…';
+  try {
+    // action(), not api(): this route is token-gated, and calling it without
+    // the header made the button return 403 every time.
+    state.health = await action('/api/health/run', {});
+    state.history = await api('/api/history');
+    const rules = await api('/api/rules');
+    const cat = new Map(rules.map((r) => [r.code, r.category]));
+    for (const f of state.health.findings || []) f.category = cat.get(f.rule) || 'other';
+    renderOverview();
+    renderFindings();
+    renderGraph();
+  } catch (e) {
+    showError(`健檢失敗：${e.message}`);
+  } finally {
+    b.disabled = false;
+    b.textContent = '執行健檢';
+  }
+});
+
+loadAll().catch((e) => showError(e.message));

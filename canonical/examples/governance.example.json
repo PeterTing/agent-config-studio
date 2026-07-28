@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "Copy to canonical/governance.json and edit. Every section is optional.",
+    "",
+    "generated[] - files rendered from canonical sources. Editing the target",
+    "              directly is drift, caught by rule MR003.",
+    "mirrors[]   - path groups that must stay byte-identical. `source` is the",
+    "              authoritative copy; `studio sync` pushes it to the others and",
+    "              rule MR001 fails when they diverge.",
+    "vendored[]  - content installed from elsewhere. Findings there are reported",
+    "              but never block, because editing it is undone on upgrade.",
+    "waivers[]   - findings acknowledged and not being fixed, each with a reason.",
+    "              A waiver is a decision on the record, not a mute button.",
+    "",
+    "`~` is expanded. Relative paths in `sources` resolve from the repo root."
+  ],
+
+  "generated": [
+    {
+      "target": "~/.claude/CLAUDE.md",
+      "sources": ["canonical/core.md", "canonical/claude.delta.md"],
+      "vars": {
+        "BUILTIN_BROWSER": "`mcp__claude-in-chrome__*`",
+        "FRONTEND_SKILL": "`frontend-design`"
+      }
+    },
+    {
+      "target": "~/.codex/AGENTS.md",
+      "sources": ["canonical/core.md", "canonical/codex.delta.md"],
+      "vars": {
+        "BUILTIN_BROWSER": "the Browser or Chrome plugin",
+        "FRONTEND_SKILL": "`frontend-skill`"
+      }
+    }
+  ],
+
+  "mirrors": [
+    {
+      "name": "example-shared-skill",
+      "source": "~/.claude/skills/example-shared-skill/SKILL.md",
+      "paths": [
+        "~/.claude/skills/example-shared-skill/SKILL.md",
+        "~/.codex/skills/example-shared-skill/SKILL.md"
+      ]
+    }
+  ],
+
+  "vendored": [
+    {
+      "path": "~/.codex/skills/some-upstream-skill/SKILL.md",
+      "reason": "Copied from upstream and re-copied on upgrade, so edits here do not persist."
+    }
+  ],
+
+  "waivers": [
+    {
+      "rule": "SK007",
+      "path": "~/.claude/skills/huge-vendor-skill/SKILL.md",
+      "reason": "Vendor skill; splitting it is undone by the next upgrade. Tracked upstream."
+    }
+  ]
+}

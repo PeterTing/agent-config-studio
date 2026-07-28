@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agent-config-studio.healthcheck</string>
+
+  <!-- __PYTHON__, __LIB__ and __VAR__ are substituted by
+       scripts/install-launchd.sh. __LIB__ is a copy of the package under
+       ~/Library/Application Support, NOT the repo: macOS TCC denies launchd
+       access to ~/Documents, and pointing WorkingDirectory there makes Python
+       hang in getcwd() before running any code. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON__</string>
+    <string>-m</string>
+    <string>studio.cli</string>
+    <string>health</string>
+    <string>--with-updates</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__LIB__</string>
+
+  <!-- 09:20 daily: after the machine is normally awake, and off the hour so it
+       does not compete with other scheduled jobs. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>20</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__VAR__/reports/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__VAR__/reports/launchd.err.log</string>
+
+  <!-- Deliberately NOT ProcessType=Background with LowPriorityIO: under that QoS
+       class macOS throttles I/O hard enough that indexing the transcript history
+       took over ten minutes instead of about one. Nice keeps it polite without
+       the throttle, and the per-file usage cache keeps a warm run near a second. -->
+  <key>Nice</key>
+  <integer>5</integer>
+</dict>
+</plist>

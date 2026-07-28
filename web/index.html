@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Config Studio</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Agent Config Studio <span id="roots"></span></h1>
+      <span id="verdict" class="verdict unknown">…</span>
+      <span id="stamp" class="muted mono" style="font-size: 11.5px"></span>
+      <span class="spacer"></span>
+      <button id="btn-refresh">重新掃描</button>
+      <button id="btn-check" class="primary">執行健檢</button>
+    </header>
+
+    <nav id="tabs">
+      <button data-tab="overview" aria-selected="true">總覽</button>
+      <button data-tab="graph" aria-selected="false">關聯圖</button>
+      <button data-tab="findings" aria-selected="false">合規問題 <span class="count" id="tab-findings-count"></span></button>
+      <button data-tab="plugins" aria-selected="false">套件與更新 <span class="count" id="tab-updates-count"></span></button>
+      <button data-tab="inventory" aria-selected="false">清單</button>
+      <button data-tab="sync" aria-selected="false">同步狀態</button>
+    </nav>
+
+    <main>
+      <div id="error" class="banner err" hidden></div>
+
+      <!-- ---------------- overview ---------------- -->
+      <section id="tab-overview">
+        <div id="status" class="status">
+          <div class="status-mark" id="status-mark">–</div>
+          <div class="status-body">
+            <h2 id="status-title">載入中…</h2>
+            <p id="status-line"></p>
+            <ul id="status-actions"></ul>
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <h3>阻斷性問題</h3>
+            <div class="metric" id="m-blocking">–</div>
+            <div class="sub">必須修好或明確豁免才算合規</div>
+          </div>
+          <div class="card">
+            <h3>預載 skill metadata</h3>
+            <div class="metric" id="m-meta">–<small> tokens</small></div>
+            <div class="sub" id="m-meta-sub"></div>
+          </div>
+          <div class="card">
+            <h3>可用更新</h3>
+            <div class="metric" id="m-updates">–</div>
+            <div class="sub" id="m-updates-sub">尚未檢查</div>
+          </div>
+          <div class="card">
+            <h3>Instruction 行數</h3>
+            <div class="metric" id="m-instr">–</div>
+            <div class="sub">官方建議每檔 &lt; 200 行</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>預載 skill metadata 是什麼</h2>
+          <div class="body" id="meta-breakdown"></div>
+        </div>
+
+        <div class="panel">
+          <h2>健檢趨勢</h2>
+          <div class="body">
+            <div id="trend-wrap"></div>
+            <div class="sub" id="trend-sub"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>這些數字代表什麼</h2>
+          <div class="body scroll"><table id="tbl-breakdown"></table></div>
+        </div>
+
+        <div class="panel">
+          <h2>使用量索引覆蓋率</h2>
+          <div class="body" id="coverage"></div>
+        </div>
+      </section>
+
+      <!-- ---------------- graph ---------------- -->
+      <section id="tab-graph" hidden>
+        <div class="filters">
+          <label>種類</label>
+          <select id="g-kind">
+            <option value="">全部</option>
+            <option value="instruction">instruction</option>
+            <option value="skill">skill</option>
+            <option value="workflow">workflow</option>
+            <option value="command">command</option>
+            <option value="agent">agent</option>
+            <option value="hook">hook</option>
+            <option value="plugin">plugin</option>
+          </select>
+          <label>Runtime</label>
+          <select id="g-runtime">
+            <option value="">全部</option>
+            <option value="claude">claude</option>
+            <option value="codex">codex</option>
+            <option value="shared">shared</option>
+          </select>
+          <label><input type="checkbox" id="g-expand" /> 展開 plugin skill</label>
+          <label><input type="checkbox" id="g-connected" checked /> 只看有連線的</label>
+          <input id="g-search" placeholder="搜尋名稱…" style="min-width: 150px" />
+          <button id="g-reset">重置視角</button>
+          <span class="muted" id="g-stats" style="font-size: 12px"></span>
+        </div>
+        <div class="graph-wrap">
+          <div>
+            <svg id="graph"></svg>
+            <div class="legend" id="legend"></div>
+          </div>
+          <div class="panel" style="margin-top: 0">
+            <h2>節點詳情</h2>
+            <div class="body" id="detail"><div class="empty">點一個節點看它的關聯。滾輪縮放，拖曳平移。</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ---------------- findings ---------------- -->
+      <section id="tab-findings" hidden>
+        <div class="filters">
+          <label>嚴重度</label>
+          <select id="f-sev">
+            <option value="">全部</option>
+            <option value="critical">critical</option>
+            <option value="important">important</option>
+            <option value="minor">minor</option>
+          </select>
+          <label>歸屬</label>
+          <select id="f-owner">
+            <option value="">全部</option>
+            <option value="local">local（你能修）</option>
+            <option value="vendor">vendor（升級才會變）</option>
+          </select>
+          <label>分類</label>
+          <select id="f-cat"><option value="">全部</option></select>
+          <label><input type="checkbox" id="f-blocking" /> 只看阻斷性</label>
+          <input id="f-search" placeholder="搜尋規則 / 路徑 / 內容…" style="min-width: 200px" />
+          <span class="muted" id="f-stats" style="font-size: 12px"></span>
+        </div>
+        <div class="filters" id="fixbar">
+          <button id="btn-fix-preview">預覽可一鍵修復的變更</button>
+          <button id="btn-fix-apply" class="primary">一鍵修復</button>
+          <span class="muted" id="fix-stats" style="font-size: 12px"></span>
+        </div>
+        <div class="panel" id="fix-preview-panel" hidden>
+          <h2>待套用的變更</h2>
+          <div class="body"><pre id="fix-preview"></pre></div>
+        </div>
+        <div class="panel result" id="fix-result" hidden></div>
+        <div class="panel"><div class="body scroll"><table id="tbl-findings"></table></div></div>
+      </section>
+
+      <!-- ---------------- plugins ---------------- -->
+      <section id="tab-plugins" hidden>
+        <div class="filters">
+          <button id="btn-updates" class="primary">檢查雲端更新</button>
+          <span class="muted" id="u-stats" style="font-size: 12px"></span>
+        </div>
+        <div class="panel">
+          <h2>可更新項目</h2>
+          <div class="body" id="update-howto"></div>
+        </div>
+        <div class="panel">
+          <h2>Skill 工具組（git checkout，非 plugin）</h2>
+          <div class="body scroll"><table id="tbl-toolkits"></table></div>
+        </div>
+        <div class="panel">
+          <h2>Plugin</h2>
+          <div class="body scroll"><table id="tbl-plugins"></table></div>
+        </div>
+      </section>
+
+      <!-- ---------------- inventory ---------------- -->
+      <section id="tab-inventory" hidden>
+        <div class="filters">
+          <label>種類</label>
+          <select id="i-kind">
+            <option value="skills">skills</option>
+            <option value="instructions">instructions</option>
+            <option value="workflows">workflows</option>
+            <option value="commands">commands</option>
+            <option value="agents">agents</option>
+            <option value="hooks">hooks</option>
+          </select>
+          <label>來源</label>
+          <select id="i-origin">
+            <option value="usable">可取用的（預設）</option>
+            <option value="">全部（含載入不到的）</option>
+            <option value="local">只看我自己寫的</option>
+            <option value="toolkit">只看工具組帶的</option>
+            <option value="plugin">只看 plugin 帶的</option>
+            <option value="orphan-library">只看載入不到的</option>
+          </select>
+          <input id="i-search" placeholder="搜尋名稱或用途…" style="min-width: 220px" />
+          <label class="chk"><input type="checkbox" id="i-cards" checked /> 目錄檢視</label>
+          <span class="muted" id="i-stats" style="font-size: 12px"></span>
+        </div>
+        <div class="panel" id="i-howto-panel">
+          <h2>怎麼取用</h2>
+          <div class="body" id="i-howto"></div>
+        </div>
+        <div class="panel" id="i-cards-panel"><div class="body" id="cards-inventory"></div></div>
+        <div class="panel" id="i-table-panel" hidden><div class="body scroll"><table id="tbl-inventory"></table></div></div>
+      </section>
+
+      <!-- ---------------- sync ---------------- -->
+      <section id="tab-sync" hidden>
+        <div class="panel">
+          <h2>這頁在做什麼</h2>
+          <div class="body">
+            <p class="sub" style="margin: 0 0 8px">
+              Claude Code 讀 <code class="mono">CLAUDE.md</code>，Codex 讀 <code class="mono">AGENTS.md</code>。
+              這兩個檔案不是手寫的，是由 <code class="mono">canonical/</code> 底下的來源檔<b>產生</b>出來的，
+              所以同一套規則不會在兩邊走鐘。
+            </p>
+            <p class="sub" style="margin: 0">
+              <b>這頁回答三件事：</b>產生出來的檔案還跟來源一致嗎（下方第一塊）、
+              套用下去會改動什麼（第二塊）、以及過去每一次改動的還原點（第三塊）。
+              平常顯示「已同步」就不用管它。
+            </p>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>1. 產生出來的檔案還跟來源一致嗎</h2>
+          <div class="body" id="sync-status"></div>
+        </div>
+        <div class="panel">
+          <h2>2. 待套用差異</h2>
+          <div class="body">
+            <p class="sub" style="margin: 0 0 8px">
+              來源改了但還沒套用時，這裡會顯示即將寫進 <code class="mono">CLAUDE.md</code> /
+              <code class="mono">AGENTS.md</code> 的內容。空的代表沒有待處理的改動。
+            </p>
+            <pre id="sync-diff">載入中…</pre>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>3. 還原點</h2>
+          <div class="body" style="padding-bottom: 0">
+            <p class="sub" style="margin: 0">
+              這個工具每次寫入你的設定前，都會先把<b>被取代的原始位元組</b>存起來。
+              按「還原」就是把那些位元組原樣放回去 —— 包含你按過的修復、停用 plugin、同步。
+              時間新的在上面。
+            </p>
+          </div>
+          <div class="body scroll"><table id="tbl-backups"></table></div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

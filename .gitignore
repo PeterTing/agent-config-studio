@@ -1,0 +1,23 @@
+# Generated state: inventories, reports, patches, backups, caches.
+var/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Your configuration, not the tool's.
+#
+# canonical/ holds the instruction sources that get rendered into your own
+# CLAUDE.md and AGENTS.md, plus governance declarations that reference absolute
+# paths on your machine. They are personal by nature and are deliberately not
+# tracked here. Start from canonical/examples/ instead.
+canonical/*.md
+canonical/governance.json
+# `canonical/*.md` matches only the top level, so a skill rendered from a source
+# under canonical/skills/ would ship your actual instruction content - project
+# names, internal routing, tool choices - to whoever clones this.
+canonical/skills/
+!canonical/README.md
+!canonical/examples/
+
+# Personal acceptance-tracking file, if you use one.
+prd-tracker.json
