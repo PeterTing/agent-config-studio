@@ -294,6 +294,22 @@ function updateResultHtml(res, seconds) {
        </div>`;
 }
 
+/**
+ * Describe what sync covers, from the targets it actually rendered.
+ *
+ * Hardcoding this named two files while six were checked. Anything the page
+ * says about coverage has to come from the coverage itself.
+ */
+function syncTargetSummary(targets) {
+  const names = (targets || []).filter(Boolean);
+  if (!names.length) return '產生出來的檔案';
+  const counts = new Map();
+  for (const n of names) counts.set(n, (counts.get(n) || 0) + 1);
+  const parts = [...counts.entries()].map(([name, n]) => (n > 1 ? `${n} 個 ${name}` : name));
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join('、')} 與 ${parts[parts.length - 1]}`;
+}
+
 /* ---------------- graph legend ---------------- */
 
 /* Colour and dash pattern must match `#graph .edge.*` in style.css exactly,
@@ -348,6 +364,7 @@ export {
   updateRunningHtml,
   updateResultHtml,
   legendHtml,
+  syncTargetSummary,
   displayName,
   EDGE_STYLE,
   HOWTO,

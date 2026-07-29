@@ -578,6 +578,11 @@ class Handler(SimpleHTTPRequestHandler):
             "pending": cs.manifest()["changes"],
             "diff": cs.diff(),
             "apply_command": "python3 -m studio.cli sync --apply",
+            # What is actually being kept in sync. Without this the page could
+            # only hardcode a description, and it did - naming two files while
+            # six were checked, so a reader could hand-edit a generated skill
+            # believing sync did not cover it.
+            "targets": [os.path.basename(c.path) for c in changes],
         }
 
     def _summary(self, fresh: bool) -> dict:

@@ -21,3 +21,6 @@ canonical/skills/
 
 # Personal acceptance-tracking file, if you use one.
 prd-tracker.json
+
+# QA reports accumulate per run and reference machine-specific paths.
+.gstack/

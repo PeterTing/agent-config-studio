@@ -15,6 +15,7 @@ import {
   updateRunningHtml,
   updateResultHtml,
   legendHtml,
+  syncTargetSummary,
 } from '/static/render.js';
 
 const $ = (id) => document.getElementById(id);
@@ -262,7 +263,7 @@ function renderCoverage(cov) {
   return cov.available
     ? `<div class="sub" style="margin:0 0 8px">「這個 plugin 有沒有在用」是從你的完整歷史算出來的，不是猜的。覆蓋率不足時相關判斷會被跳過。</div>
        <dl style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0;font-size:12.5px">
-         <dt class="muted">覆蓋率</dt><dd class="mono">${cov.file_coverage_pct}% （${num(cov.files_read)} / ${num(cov.transcripts_total)} 個 transcript，${(cov.bytes_read / 1e9).toFixed(1)} GB）</dd>
+         <dt class="muted">覆蓋率</dt><dd class="mono">${cov.file_coverage_pct}% （${num(cov.files_read)} / ${num(cov.files_total ?? cov.transcripts_total)} 個檔案，含 ${num(cov.history_files_total ?? 0)} 個 history，${(cov.bytes_read / 1e9).toFixed(1)} GB）</dd>
          <dt class="muted">skill 呼叫</dt><dd class="mono">${num(cov.total_invocations)}</dd>
          <dt class="muted">MCP tool 呼叫</dt><dd class="mono">${num(cov.mcp_tool_calls)}</dd>
          <dt class="muted">subagent 啟動</dt><dd class="mono">${num(cov.agent_spawns)}</dd>
@@ -832,7 +833,7 @@ async function loadSync() {
     const s = await api('/api/sync-preview');
     $('sync-status').innerHTML =
       (s.in_sync
-        ? '<span class="tag ok">已同步</span> CLAUDE.md 與 AGENTS.md 都與 canonical 一致。'
+        ? `<span class="tag ok">已同步</span> ${syncTargetSummary(s.targets)} 都與 canonical 一致。`
         : `<span class="tag important">有差異</span> ${s.pending.length} 個檔案與 canonical 不一致。`) +
       (s.errors.length ? `<div class="banner err" style="margin-top:8px">${s.errors.map(escapeHtml).join('<br>')}</div>` : '') +
       `<div class="sub">要改規則就改 <code>canonical/</code> 底下的來源檔。直接改產生出來的檔案會被規則 MR003 抓到。</div>` +

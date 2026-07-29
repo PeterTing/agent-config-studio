@@ -178,6 +178,15 @@ _ROUTE_MIN_LEN = 6
 #: A line that actually dispatches work somewhere. Either a table row - routing
 #: tables are how both runtimes' instructions are written - or a verb that hands
 #: the task off. Everything else may use backticks for values, keys and flags.
+#: A heading or table-key column that marks a mapping from something no longer
+#: available to what replaces it. Column one of such a table is a key, not a
+#: route.
+_TRANSLATION_RE = re.compile(
+    r"舊命令|舊指令|對應做法|命令對應|指令對應"
+    r"|\bold\b|\bformer\b|\blegacy\b|\bdeprecated\b|\bwas\b|\bmigrat",
+    re.I,
+)
+
 _ROUTING_LINE = re.compile(
     r"^\s*\||\b(use|uses|run|runs|invoke|call|read|see|route[sd]?|delegate|apply)\b"
     r"|走|用|跑|讀|見|改用|呼叫|套用|加上",
@@ -282,14 +291,38 @@ def wf006(inv: Inventory, cfg: Config):
         if rt not in known_by_runtime:
             known_by_runtime[rt] = _routable_names(inv, rt)
         known = known_by_runtime[rt]
+        heading = ""
+        translating = False
         for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                heading = stripped.lstrip("#").strip()
+                translating = bool(_TRANSLATION_RE.search(heading))
+            elif stripped.startswith("|") and not translating:
+                first = stripped.strip("|").split("|")[0].strip()
+                if _TRANSLATION_RE.search(first):
+                    translating = True
+            elif not stripped:
+                pass
             if not _ROUTING_LINE.search(line):
                 # Backticks mark all sorts of things - status values
                 # (`not-covered`), CI trigger names (`pre-pr`), config keys. Only
                 # a line that actually routes work can contain a dead route, and
                 # without this the rule reported two of those for every real one.
                 continue
-            for token in re.findall(r"`([^`\n]{1,80})`", line):
+            searchable = line
+            if line.lstrip().startswith("|"):
+                cells = line.strip().strip("|").split("|")
+                if len(cells) > 1 and translating:
+                    # Only in a translation table. Its key column names a command
+                    # precisely because it is *not* available here - "old
+                    # `/qa-only` -> do this in Codex instead" - and reading those
+                    # keys as routes flagged fourteen correct rows for every real
+                    # one. Elsewhere the first column is often the target itself
+                    # (`| agent-browser | Chrome via CDP | ... |`), so suppressing
+                    # it everywhere would silently miss a route that was removed.
+                    searchable = "|".join(cells[1:])
+            for token in re.findall(r"`([^`\n]{1,80})`", searchable):
                 name = token.strip().lstrip("/").split(":")[-1]
                 if len(name) < _ROUTE_MIN_LEN or "-" not in name:
                     continue

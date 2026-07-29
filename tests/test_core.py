@@ -3487,3 +3487,111 @@ class GateAcceptsEitherLoopbackName(unittest.TestCase):
 
     def test_another_port_is_still_refused(self):
         self.assertIsNotNone(self._refusal("http://127.0.0.1:9999"))
+
+
+class TranslationTableKeysAreNotRoutes(unittest.TestCase):
+    """A translation table names a command precisely because it is not available
+    here - "old `/qa-only` -> do this instead". Reading its key column as a route
+    flagged fourteen correct rows for every real one.
+
+    The suppression is deliberately narrow. Applying it to every table created
+    the opposite failure: a tool-selection table often puts the target in column
+    one (`| agent-browser | Chrome via CDP | ... |`), and a removed route there
+    would then go unreported - a silent miss, which is worse than a visible
+    false positive.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _findings(self, body):
+        from studio.model import Workflow
+        from studio.rules.workflows import wf006
+
+        path = os.path.join(self._tmp.name, "wf.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        inv = Inventory()
+        inv.workflows = [Workflow(id="w", path=path, runtime=Runtime.CLAUDE, lines=1)]
+        inv.skills = [
+            Skill(
+                id="s",
+                name="real-skill",
+                dir_name="real-skill",
+                path="/x/real/SKILL.md",
+                runtime=Runtime.CLAUDE,
+                origin=Origin.LOCAL,
+                description="d",
+            )
+        ]
+        return [f.evidence["name"] for f in wf006(inv, Config(repo_root="."))]
+
+    def test_a_translation_key_is_not_flagged(self):
+        body = "## 舊命令對應\n\n| 舊命令 | Codex 做法 |\n| --- | --- |\n| `/gone-command` | 測試 + 報告 |\n"
+        self.assertEqual(self._findings(body), [])
+
+    def test_an_english_legacy_table_is_also_recognised(self):
+        body = "## Old commands\n\n| Old | Do instead |\n| --- | --- |\n| `gone-command` | run tests |\n"
+        self.assertEqual(self._findings(body), [])
+
+    def test_a_tool_table_still_reports_a_removed_first_column_target(self):
+        """The regression Codex caught: suppressing column one everywhere turned
+        a visible false positive into a silent false negative."""
+        body = "### 瀏覽器工具選擇\n\n| 工具 | 底層 |\n| --- | --- |\n| `gone-tool` | Chrome via CDP |\n"
+        self.assertEqual(self._findings(body), ["gone-tool"])
+
+    def test_a_value_column_target_is_always_checked(self):
+        body = "## 常用技能\n\n| 類型 | 建議 |\n| --- | --- |\n| 前端 | use `gone-skill` |\n"
+        self.assertEqual(self._findings(body), ["gone-skill"])
+
+    def test_an_existing_target_is_never_reported(self):
+        body = "### 工具\n\n| 工具 | 說明 |\n| --- | --- |\n| `real-skill` | exists |\n"
+        self.assertEqual(self._findings(body), [])
+
+    def test_prose_outside_a_table_is_unaffected(self):
+        self.assertEqual(self._findings("Use `gone-skill` first.\n"), ["gone-skill"])
+
+
+class CoverageExposesItsOwnDenominator(unittest.TestCase):
+    """The page could only render `files_read / transcripts_total`, which shows
+    more files read than exist because the numerator includes history files.
+    The percentage was right; the fraction beside it could not be true, and that
+    fraction is the evidence the unused-plugin rules rest on."""
+
+    def _summary(self, **kw):
+        from studio.usage import UsageIndex
+
+        idx = UsageIndex()
+        for k, v in kw.items():
+            setattr(idx, k, v)
+        return idx.summary()
+
+    def test_summary_reports_the_total_it_divides_by(self):
+        s = self._summary(files_read=4139, total_transcripts=4137, total_history_files=2)
+        self.assertEqual(s["files_total"], 4139)
+        self.assertEqual(s["history_files_total"], 2)
+        self.assertEqual(s["file_coverage_pct"], 100.0)
+
+    def test_the_displayable_fraction_is_never_over_one(self):
+        s = self._summary(files_read=4139, total_transcripts=4137, total_history_files=2)
+        self.assertLessEqual(s["files_read"], s["files_total"])
+
+    def test_a_partial_scan_still_reads_correctly(self):
+        s = self._summary(files_read=100, total_transcripts=200, total_history_files=1)
+        self.assertEqual(s["files_total"], 201)
+        self.assertLess(s["file_coverage_pct"], 100.0)
+
+
+class SyncPreviewNamesItsTargets(unittest.TestCase):
+    def test_the_payload_lists_every_rendered_target(self):
+        """The status line is built from this. Without it the page hardcoded a
+        description that named two files while six were checked."""
+        import inspect
+
+        from studio import server
+
+        src = inspect.getsource(server.Handler._sync_preview)
+        self.assertIn('"targets"', src, "sync-preview does not expose what it covers")

@@ -102,6 +102,12 @@ class UsageIndex:
             "truncated": self.truncated,
             "files_cached": self.files_cached,
             "transcripts_total": self.total_transcripts,
+            "history_files_total": self.total_history_files,
+            # What the percentage is actually computed over. Without it the page
+            # could only show `files_read / transcripts_total`, which reads as
+            # more files read than exist - and this is the evidence the
+            # unused-plugin rules rest on.
+            "files_total": self.total_transcripts + self.total_history_files,
             "transcript_bytes_total": self.total_transcript_bytes,
             "file_coverage_pct": _coverage_pct(
                 self.files_read, self.total_transcripts + self.total_history_files

@@ -20,6 +20,7 @@ import {
   updateRunningHtml,
   updateResultHtml,
   legendHtml,
+  syncTargetSummary,
   escapeHtml,
   EDGE_STYLE,
 } from '../web/render.js';
@@ -367,6 +368,31 @@ test('solid relationships are drawn without a dash pattern', () => {
 test('legend node colours come from the graph, never invented', () => {
   const html = legendHtml(['skill'], [], { skill: '#3d6fd6' }, {});
   assert.ok(html.includes('#3d6fd6'));
+});
+
+/* ---------------- sync coverage ---------------- */
+
+test('sync coverage is described from the targets actually rendered', () => {
+  // It was hardcoded as "CLAUDE.md and AGENTS.md" while six files were checked,
+  // so a reader could hand-edit a generated skill believing sync missed it.
+  const out = syncTargetSummary([
+    'CLAUDE.md', 'AGENTS.md', 'SKILL.md', 'SKILL.md', 'SKILL.md', 'SKILL.md',
+  ]);
+  assert.ok(out.includes('4 個 SKILL.md'), `did not account for the skills: ${out}`);
+  assert.ok(out.includes('CLAUDE.md') && out.includes('AGENTS.md'));
+});
+
+test('two targets read naturally', () => {
+  assert.equal(syncTargetSummary(['CLAUDE.md', 'AGENTS.md']), 'CLAUDE.md 與 AGENTS.md');
+});
+
+test('a single target needs no conjunction', () => {
+  assert.equal(syncTargetSummary(['CLAUDE.md']), 'CLAUDE.md');
+});
+
+test('no targets never claims specific files', () => {
+  assert.equal(syncTargetSummary([]), '產生出來的檔案');
+  assert.equal(syncTargetSummary(undefined), '產生出來的檔案');
 });
 
 /* ---------------- report ---------------- */
