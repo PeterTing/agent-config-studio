@@ -159,7 +159,17 @@ def hk003(inv: Inventory, cfg: Config):
     "hooks",
 )
 def hk004(inv: Inventory, cfg: Config):
-    tool_events = {"PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest"}
+    # The five events the hooks documentation lists as matching on tool name and
+    # evaluating `if`. `PermissionDenied` was added to that family after this
+    # rule was written, and an unscoped hook on it went unreported until the
+    # spec-drift check caught the change.
+    tool_events = {
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PermissionRequest",
+        "PermissionDenied",
+    }
     for h in inv.hooks:
         if h.event not in tool_events or h.if_rule:
             continue

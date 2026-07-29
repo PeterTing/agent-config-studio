@@ -22,6 +22,7 @@
       <button data-tab="findings" aria-selected="false">合規問題 <span class="count" id="tab-findings-count"></span></button>
       <button data-tab="plugins" aria-selected="false">套件與更新 <span class="count" id="tab-updates-count"></span></button>
       <button data-tab="inventory" aria-selected="false">清單</button>
+      <button data-tab="specs" aria-selected="false">規範與排程 <span class="count" id="tab-specs-count"></span></button>
       <button data-tab="sync" aria-selected="false">同步狀態</button>
     </nav>
 
@@ -150,6 +151,7 @@
         <div class="filters" id="fixbar">
           <button id="btn-fix-preview">預覽可一鍵修復的變更</button>
           <button id="btn-fix-apply" class="primary">一鍵修復</button>
+          <button id="btn-consolidate">AI 整合建議（拆分過大的 skill / 處理重複）</button>
           <span class="muted" id="fix-stats" style="font-size: 12px"></span>
         </div>
         <div class="panel" id="fix-preview-panel" hidden>
@@ -157,6 +159,7 @@
           <div class="body"><pre id="fix-preview"></pre></div>
         </div>
         <div class="panel result" id="fix-result" hidden></div>
+        <div class="panel" id="consolidate-panel" hidden></div>
         <div class="panel"><div class="body scroll"><table id="tbl-findings"></table></div></div>
       </section>
 
@@ -209,8 +212,40 @@
           <h2>怎麼取用</h2>
           <div class="body" id="i-howto"></div>
         </div>
+        <div class="panel" id="peek" hidden></div>
         <div class="panel" id="i-cards-panel"><div class="body" id="cards-inventory"></div></div>
         <div class="panel" id="i-table-panel" hidden><div class="body scroll"><table id="tbl-inventory"></table></div></div>
+      </section>
+
+      <!-- ---------------- specs & schedule ---------------- -->
+      <section id="tab-specs" hidden>
+        <div class="panel">
+          <h2>這頁在做什麼</h2>
+          <div class="body">
+            <p class="sub" style="margin: 0 0 8px">
+              每一條規則都引用一份公開文件。那些文件會改版，而依據舊版寫成的規則會變成
+              <b>理直氣壯的錯</b> —— 不會有任何東西報錯，它只是安靜地檢查錯的東西。
+            </p>
+            <p class="sub" style="margin: 0">
+              這頁抓取每份被引用的文件，跟基準比對雜湊。<b>偵測是決定性的</b>，不用 AI；
+              只有「這份變了，相關規則還成立嗎」的分析才會呼叫模型，而且它<b>只產生意見，
+              永遠不會自己改規則</b>。
+            </p>
+          </div>
+        </div>
+        <div class="filters">
+          <button id="btn-specs" class="primary">檢查規範是否更新</button>
+          <button id="btn-specs-review">分析變動對規則的影響（用 AI）</button>
+          <button id="btn-specs-accept">記為已檢視</button>
+          <span class="muted" id="specs-stats" style="font-size: 12px"></span>
+        </div>
+        <div class="panel"><div class="body" id="specs-body">
+          <span class="muted">按上方「檢查規範是否更新」。會連到官方文件抓取，約需十幾秒。</span>
+        </div></div>
+        <div class="panel">
+          <h2>定期健檢</h2>
+          <div class="body" id="schedule-body"><span class="muted">載入中…</span></div>
+        </div>
       </section>
 
       <!-- ---------------- sync ---------------- -->

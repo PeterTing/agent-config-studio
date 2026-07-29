@@ -96,6 +96,8 @@ it, and where it lives. The panel above explains the trigger mechanism for that
 kind. It lists only what is actually **usable** by default — items that cannot
 load are behind the "all" filter and are labelled as such.
 
+**Specs & schedule** — *Has the guidance itself moved, and is the daily check running?* Every cited document re-fetched and compared against a recorded baseline, with an optional AI review of what a change means for the rules that depend on it. Detection is deterministic; the review is an opinion and never edits a rule.
+
 **Sync** — *Have my generated instruction files drifted?* Whether `CLAUDE.md` and
 `AGENTS.md` still match their canonical sources, the pending diff, and every
 restore point.

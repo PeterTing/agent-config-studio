@@ -276,6 +276,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send(self._updates(fresh))
             if route == "/api/sync-preview":
                 return self._send(self._sync_preview())
+            if route == "/api/specs":
+                # Network-bound and re-fetches every cited document, so it is
+                # gated like the other expensive reads.
+                refusal = self._from_this_page()
+                if refusal:
+                    return self._send(
+                        {"error": refusal, "command": "studio specs"}, HTTPStatus.FORBIDDEN
+                    )
+                return self._send(self._specs())
+            if route == "/api/schedule":
+                return self._send(self._schedule())
             if route == "/api/backups":
                 return self._send(patch.list_backups(self.repo_root))
             if route == "/api/session":
@@ -332,6 +343,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "/api/actions/rollback",
                 "/api/actions/fix",
                 "/api/actions/update",
+                "/api/actions/specs-accept",
+                "/api/actions/specs-review",
+                "/api/actions/consolidate",
             ):
                 refusal = self._authorised()
                 if refusal:
@@ -346,6 +360,15 @@ class Handler(SimpleHTTPRequestHandler):
                     return self._send(self._fix(body.get("keys") or [], bool(body.get("dry_run"))))
                 if route == "/api/actions/update":
                     return self._send(self._update(self._body().get("target") or ""))
+                if route == "/api/actions/specs-accept":
+                    return self._send(self._specs_accept())
+                if route == "/api/actions/specs-review":
+                    return self._send(self._specs_review(self._body().get("urls") or []))
+                if route == "/api/actions/consolidate":
+                    body = self._body()
+                    return self._send(
+                        self._consolidate(body.get("keys") or [], bool(body.get("apply")))
+                    )
                 return self._send(self._rollback(self._body().get("id", "")))
 
             self._send({"error": f"no route {route}"}, HTTPStatus.NOT_FOUND)
@@ -552,6 +575,108 @@ class Handler(SimpleHTTPRequestHandler):
         with _CACHE_LOCK:
             _CACHE["updates"] = payload
         return payload
+
+    def _specs(self) -> dict:
+        """Whether any document the rules cite has changed since the baseline."""
+        from . import specs as specs_mod
+
+        cfg = Config.load(self.repo_root)
+        states = specs_mod.check(self.repo_root, allow_network=True)
+        return {
+            "specs": [s.to_dict() for s in states],
+            "changed": [s.url for s in states if s.status == "changed"],
+            "new": [s.url for s in states if s.status == "new"],
+            "unreachable": [s.url for s in states if s.status == "unreachable"],
+            "governance_error": cfg.governance_error,
+        }
+
+    def _specs_accept(self) -> dict:
+        """Record the current documents as reviewed.
+
+        Never automatic: a rule is a claim about what the guidance says, and that
+        claim should only change when a person agrees it should.
+        """
+        from . import specs as specs_mod
+
+        states = specs_mod.check(self.repo_root, allow_network=True)
+        path = specs_mod.record(self.repo_root, states)
+        return {"baseline": path, "recorded": [s.url for s in states if s.current_hash]}
+
+    def _specs_review(self, urls: list[str]) -> dict:
+        """Ask what changed and whether the dependent rules still hold.
+
+        The only place a model touches the rule set, and it produces a review
+        and nothing else: a rule is a claim about what the guidance says, and
+        that claim changes only when a person agrees it should.
+        """
+        from . import specs as specs_mod
+
+        states = {s.url: s for s in specs_mod.check(self.repo_root, allow_network=True)}
+        reviews = []
+        for url in urls[:4]:
+            state = states.get(url)
+            if state is None:
+                continue
+            reviews.append(specs_mod.review_change(state, self.repo_root))
+        return {"reviews": reviews}
+
+    def _schedule(self) -> dict:
+        """Status of the scheduled daily check, if one is installed."""
+        import subprocess
+
+        script = os.path.join(self.repo_root, "scripts", "install-launchd.sh")
+        if not os.path.isfile(script):
+            return {"available": False, "reason": "installer not present"}
+        try:
+            p = subprocess.run(
+                [script, "status"], capture_output=True, text=True, timeout=60, check=False
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"available": False, "reason": str(exc)}
+        out = p.stdout or ""
+        return {
+            "available": True,
+            "installed": "not loaded" not in out.lower() and p.returncode == 0,
+            "output": out.strip()[:2000],
+            "install_command": "scripts/install-launchd.sh install",
+        }
+
+    def _consolidate(self, keys: list[str], apply: bool) -> dict:
+        """AI-planned consolidation. The model proposes; code validates."""
+        from . import ai, consolidate as consolidate_mod
+
+        if not ai.available():
+            return {"error": "找不到 claude CLI，無法取得 AI 建議。", "proposals": []}
+
+        _inv, _cfg, report = self._report_findings()
+        wanted = set(keys)
+        targets = [
+            f
+            for f in report.findings
+            if consolidate_mod.can_propose(f.rule) and (not wanted or f.key in wanted)
+        ]
+        proposals, applied, cost = [], 0, 0.0
+        for finding in targets[:5]:
+            p = consolidate_mod.propose(finding, self.repo_root)
+            if p is None:
+                continue
+            cost += getattr(p, "cost_usd", 0.0) or 0.0
+            row = {
+                "rule": finding.rule,
+                "path": finding.path,
+                "key": finding.key,
+                "ok": p.ok,
+                "summary": p.summary,
+                "rejected_because": p.rejected_because,
+                "diff": p.change_set.diff() if (p.ok and p.change_set) else "",
+            }
+            if apply and p.ok and p.change_set:
+                result = patch.apply(p.change_set, self.repo_root)
+                row["applied"] = True
+                row["backup"] = result["backup"]
+                applied += 1
+            proposals.append(row)
+        return {"proposals": proposals, "applied": applied, "cost_usd": round(cost, 4)}
 
     def _sync_preview(self) -> dict:
         cfg = Config.load(self.repo_root)

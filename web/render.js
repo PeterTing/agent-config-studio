@@ -207,6 +207,7 @@ function catalogueCard(kind, r) {
           : '<span class="muted">沒有描述 —— 沒有描述就等於不會被自動觸發。</span>'
       }</div>
       <div class="cat-f">
+        <button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button>
         ${
           orphan
             ? '<span class="off">✕ 這個載入不到 —— 它不在 agent 會讀的目錄裡，叫了也不會有反應</span>'
@@ -222,7 +223,7 @@ function catalogueCard(kind, r) {
       <div class="cat-h"><b class="mono">/${escapeHtml(name)}</b>${rt}<span class="grow"></span>
         <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
       <div class="cat-d">${escapeHtml(r.description || '（這個 command 沒有描述）')}</div>
-      <div class="cat-f"><span>打 <code class="mono">/${escapeHtml(name)}</code> 執行</span>
+      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><span>打 <code class="mono">/${escapeHtml(name)}</code> 執行</span>
         <span class="mono muted">${escapeHtml(shortPath(r.path))}</span></div>
     </article>`;
   }
@@ -231,7 +232,7 @@ function catalogueCard(kind, r) {
       <div class="cat-h"><b class="mono">${escapeHtml(name)}</b><span class="grow"></span>
         <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
       <div class="cat-d">${escapeHtml(r.description || '（沒有描述）')}</div>
-      <div class="cat-f"><span>要它做事：<code class="mono">用 ${escapeHtml(name)} agent</code></span>
+      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><span>要它做事：<code class="mono">用 ${escapeHtml(name)} agent</code></span>
         <span class="mono muted">${escapeHtml(shortPath(r.path))}</span></div>
     </article>`;
   }
@@ -248,7 +249,7 @@ function catalogueCard(kind, r) {
     <div class="cat-h"><b class="mono">${escapeHtml(shortPath(r.path))}</b>${rt}<span class="grow"></span>
       <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
     ${r.description ? `<div class="cat-d">${escapeHtml(r.description)}</div>` : ''}
-    ${kind === 'workflows' ? `<div class="cat-f"><span>要用它：<code class="mono">照 ${escapeHtml(stem)} workflow 做</code></span></div>` : ''}
+    ${kind === 'workflows' ? `<div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><span>要用它：<code class="mono">照 ${escapeHtml(stem)} workflow 做</code></span></div>` : ''}
   </article>`;
 }
 
@@ -310,6 +311,89 @@ function syncTargetSummary(targets) {
   return `${parts.slice(0, -1).join('、')} 與 ${parts[parts.length - 1]}`;
 }
 
+/* ---------------- spec freshness ---------------- */
+
+const SPEC_STATE = {
+  unchanged: ['ok', '沒有變動'],
+  changed: ['important', '已變動 —— 依據它的規則要重新確認'],
+  new: ['minor', '尚未建立基準'],
+  unreachable: ['critical', '抓不到，這次沒檢查到'],
+  unknown: ['minor', '未連線檢查'],
+};
+
+function specsHtml(payload) {
+  const rows = (payload && payload.specs) || [];
+  if (!rows.length) return '<span class="muted">沒有資料。</span>';
+  const changed = rows.filter((r) => r.status === 'changed').length;
+  const unreachable = rows.filter((r) => r.status === 'unreachable').length;
+
+  const banner = unreachable
+    ? `<div class="result bad"><b>${unreachable} 份文件抓不到</b><div>這次的結果不涵蓋它們，不能當成「規則都還正確」。</div></div>`
+    : changed
+      ? `<div class="result"><b>${changed} 份規範有變動</b><div>依據它們的規則需要重新確認。按「分析變動對規則的影響」讓模型逐條檢視，或自己開連結比對。</div></div>`
+      : '<div class="result ok"><b>✓ 所有引用的規範都跟基準一致</b><div>規則依據的文件沒有改版。</div></div>';
+
+  return (
+    banner +
+    rows
+      .map((r) => {
+        const [cls, label] = SPEC_STATE[r.status] || SPEC_STATE.unknown;
+        return `<div class="spec-row">
+          <div class="spec-head">
+            <span class="tag ${cls}">${escapeHtml(label)}</span>
+            <a href="${escapeHtml(r.url)}" target="_blank" rel="noreferrer">${escapeHtml(r.url)}</a>
+          </div>
+          <div class="sub">依據它的 ${r.rules.length} 條規則：<span class="mono">${r.rules.map(escapeHtml).join(', ')}</span></div>
+          ${r.note ? `<div class="sub">${escapeHtml(r.note)}</div>` : ''}
+        </div>`;
+      })
+      .join('')
+  );
+}
+
+function specReviewHtml(review) {
+  if (!review || !review.ok) {
+    return `<div class="result bad"><b>分析失敗</b><div>${escapeHtml((review && review.error) || '未知錯誤')}</div></div>`;
+  }
+  const verdictTag = { 'still-valid': 'ok', 'needs-update': 'important', 'no-longer-supported': 'critical' };
+  return `<div class="result">
+      <b>${escapeHtml(review.url)}</b>
+      <div class="sub" style="margin:6px 0">${escapeHtml(review.summary || '')}</div>
+      ${(review.reviews || [])
+        .map(
+          (r) => `<div class="spec-row">
+            <div class="spec-head">
+              <span class="tag ${verdictTag[r.verdict] || 'minor'}">${escapeHtml(r.verdict)}</span>
+              <b class="mono">${escapeHtml(r.rule)}</b>
+            </div>
+            <div class="sub">${escapeHtml(r.what_changed || '')}</div>
+            ${r.suggested_change ? `<div class="remedy"><b>建議：</b>${escapeHtml(r.suggested_change)}</div>` : ''}
+          </div>`,
+        )
+        .join('')}
+      <div class="sub" style="margin-top:8px">
+        這是意見，不是動作。<b>規則永遠不會被自動修改</b> —— 一條規則是一個關於「規範說了什麼」的主張，
+        那個主張只該在人同意時才改變。
+      </div>
+    </div>`;
+}
+
+function scheduleHtml(s) {
+  if (!s || !s.available) {
+    return `<span class="muted">沒有排程安裝程式${s && s.reason ? `（${escapeHtml(s.reason)}）` : ''}。</span>`;
+  }
+  if (!s.installed) {
+    return `<div class="result">
+        <b>尚未安裝每日排程</b>
+        <div class="sub">安裝後每天自動跑一次健檢，結果會出現在總覽的趨勢圖。</div>
+        <div class="sub">在 repo 根目錄執行：<code class="mono">${escapeHtml(s.install_command)}</code></div>
+      </div>`;
+  }
+  return `<div class="result ok"><b>✓ 每日排程已安裝</b>
+      <details><summary>看狀態輸出</summary><pre class="steps">${escapeHtml(s.output || '')}</pre></details>
+    </div>`;
+}
+
 /* ---------------- graph legend ---------------- */
 
 /* Colour and dash pattern must match `#graph .edge.*` in style.css exactly,
@@ -364,6 +448,9 @@ export {
   updateRunningHtml,
   updateResultHtml,
   legendHtml,
+  specsHtml,
+  specReviewHtml,
+  scheduleHtml,
   syncTargetSummary,
   displayName,
   EDGE_STYLE,

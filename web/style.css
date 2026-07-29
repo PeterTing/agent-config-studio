@@ -393,3 +393,19 @@ label.chk { display: inline-flex; align-items: center; gap: 5px; }
   background: var(--panel); border: 1px solid var(--line);
   box-shadow: 0 4px 18px rgb(0 0 0 / 0.18);
 }
+
+/* ---------- 規範新鮮度 ---------- */
+.spec-row { padding: 9px 0; border-top: 1px solid var(--line); }
+.spec-row:first-of-type { border-top: none; }
+.spec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 3px; }
+.spec-head a { font-size: 12.5px; word-break: break-all; }
+
+/* ---------- 內嵌檔案檢視 ---------- */
+button.linkish {
+  background: none; border: none; padding: 0; margin: 0;
+  color: var(--accent); cursor: pointer; font-size: 12px; text-decoration: underline;
+}
+#peek { margin-bottom: 10px; }
+#peek pre { max-height: 60vh; overflow: auto; font-size: 12px; }
+#peek .peek-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+#peek .peek-head .grow { flex: 1 1 auto; }

@@ -15,6 +15,9 @@ import {
   updateRunningHtml,
   updateResultHtml,
   legendHtml,
+  specsHtml,
+  specReviewHtml,
+  scheduleHtml,
   syncTargetSummary,
 } from '/static/render.js';
 
@@ -106,6 +109,7 @@ $('tabs').addEventListener('click', (ev) => {
     $(`tab-${b.dataset.tab}`).hidden = !on;
   }
   if (btn.dataset.tab === 'graph') graph.kick(0.4);
+  if (btn.dataset.tab === 'specs') loadSchedule();
 });
 
 /* ---------------- overview ---------------- */
@@ -454,6 +458,57 @@ $('btn-fix-apply').addEventListener('click', async () => {
   } finally {
     b.disabled = false;
     b.textContent = '一鍵修復';
+  }
+});
+
+/* AI-planned consolidation. The model proposes a plan; code validates it against
+ * the file it claims to act on and rejects it whole if anything fails. Nothing
+ * is written unless you press apply on a proposal that passed. */
+$('btn-consolidate').addEventListener('click', async () => {
+  const b = $('btn-consolidate');
+  const host = $('consolidate-panel');
+  b.disabled = true;
+  b.textContent = '產生中（會呼叫模型）…';
+  host.hidden = false;
+  host.innerHTML = '<div class="body"><span class="running"><span class="spin"></span>模型正在提方案，接著由程式逐項驗證…</span></div>';
+  try {
+    const out = await action('/api/actions/consolidate', { apply: false });
+    const rows = out.proposals || [];
+    host.innerHTML = `<div class="body">
+        <div class="sub" style="margin-bottom:8px">
+          ${rows.length ? `${rows.length} 個方案` : '沒有適用的項目'}${
+            out.cost_usd ? `　·　花費 $${out.cost_usd}` : ''
+          }。模型只提方案，<b>程式驗證過才可能套用</b>；驗證不過的整案退回，不會部分套用。
+        </div>
+        ${
+          out.error
+            ? `<div class="result bad"><b>無法產生</b><div>${escapeHtml(out.error)}</div></div>`
+            : rows
+                .map(
+                  (r) => `<div class="result ${r.ok ? 'ok' : 'bad'}">
+              <b>${r.ok ? '✓ 通過驗證' : '✕ 已退回'}</b>
+              <span class="mono" style="font-size:12px"> ${escapeHtml(r.rule)} · ${escapeHtml(shortPath(r.path))}</span>
+              <div>${escapeHtml(r.summary || '')}</div>
+              ${
+                (r.rejected_because || []).length
+                  ? `<div class="sub">退回原因：${r.rejected_because.map(escapeHtml).join('；')}</div>`
+                  : ''
+              }
+              ${r.diff ? `<details><summary>看變更</summary><pre class="steps">${escapeHtml(r.diff)}</pre></details>` : ''}
+            </div>`,
+                )
+                .join('')
+        }
+        <div class="sub" style="margin-top:8px">
+          要真的套用，用 <code class="mono">python3 -m studio.cli consolidate --apply</code>，
+          它一樣會先備份。
+        </div>
+      </div>`;
+  } catch (e) {
+    host.innerHTML = `<div class="body"><div class="result bad"><b>失敗</b><div>${escapeHtml(e.message)}</div></div></div>`;
+  } finally {
+    b.disabled = false;
+    b.textContent = 'AI 整合建議（拆分過大的 skill / 處理重複）';
   }
 });
 
@@ -812,6 +867,35 @@ function renderInventory() {
 
 for (const id of ['i-kind', 'i-origin', 'i-search', 'i-cards']) $(id).addEventListener('input', renderInventory);
 
+/* Reading a file was the missing half of "read and manage": the catalogue could
+ * tell you a skill's trigger but never let you see what it actually does. */
+$('cards-inventory').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-peek]');
+  if (!btn) return;
+  const path = btn.dataset.peek;
+  const host = $('peek');
+  host.hidden = false;
+  host.innerHTML = '<div class="body"><span class="running"><span class="spin"></span>讀取中…</span></div>';
+  host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  try {
+    const r = await api(`/api/file?path=${encodeURIComponent(path)}`);
+    host.innerHTML = `<div class="body">
+        <div class="peek-head">
+          <b class="mono">${escapeHtml(shortPath(r.path))}</b>
+          <span class="muted" style="font-size:12px">${num(r.text.split('\n').length)} 行</span>
+          <span class="grow"></span>
+          <button class="dismiss" type="button">關閉</button>
+        </div>
+        <pre>${escapeHtml(r.text)}</pre>
+      </div>`;
+    host.querySelector('.dismiss').onclick = () => {
+      host.hidden = true;
+    };
+  } catch (e) {
+    host.innerHTML = `<div class="body"><div class="result bad"><b>讀不到</b><div>${escapeHtml(e.message)}</div></div></div>`;
+  }
+});
+
 /* ---------------- sync ---------------- */
 
 function renderDiff(text) {
@@ -929,6 +1013,75 @@ function alertPanel(msg) {
     el.className = 'banner err';
   }, 6000);
 }
+
+/* ---------------- specs & schedule ---------------- */
+
+async function loadSchedule() {
+  try {
+    $('schedule-body').innerHTML = scheduleHtml(await api('/api/schedule'));
+  } catch (e) {
+    $('schedule-body').innerHTML = `<span class="muted">讀不到排程狀態：${escapeHtml(e.message)}</span>`;
+  }
+}
+
+async function runSpecs() {
+  const b = $('btn-specs');
+  b.disabled = true;
+  b.textContent = '抓取中…';
+  $('specs-body').innerHTML = '<span class="running"><span class="spin"></span>正在抓取每一份被引用的官方文件…</span>';
+  try {
+    state.specs = await api('/api/specs');
+    $('specs-body').innerHTML = specsHtml(state.specs);
+    const n = (state.specs.changed || []).length + (state.specs.unreachable || []).length;
+    $('tab-specs-count').textContent = n ? `(${n})` : '';
+    $('specs-stats').textContent =
+      `${state.specs.specs.length} 份文件；${(state.specs.changed || []).length} 份有變動`;
+  } catch (e) {
+    $('specs-body').innerHTML = `<div class="result bad"><b>抓取失敗</b><div>${escapeHtml(e.message)}</div></div>`;
+  } finally {
+    b.disabled = false;
+    b.textContent = '檢查規範是否更新';
+  }
+}
+
+$('btn-specs').addEventListener('click', runSpecs);
+
+$('btn-specs-review').addEventListener('click', async () => {
+  const changed = ((state.specs || {}).changed || []).concat(((state.specs || {}).new) || []);
+  if (!changed.length) {
+    alertPanel('沒有變動的規範需要分析。先按「檢查規範是否更新」。');
+    return;
+  }
+  const b = $('btn-specs-review');
+  b.disabled = true;
+  b.textContent = '分析中（會呼叫模型）…';
+  try {
+    // Reviewing is the only part that calls a model, and it produces an opinion
+    // about the rules - never an edit to them.
+    const out = await action('/api/actions/specs-review', { urls: changed });
+    $('specs-body').innerHTML =
+      (out.reviews || []).map(specReviewHtml).join('') + specsHtml(state.specs);
+  } catch (e) {
+    showError(`分析失敗：${e.message}`);
+  } finally {
+    b.disabled = false;
+    b.textContent = '分析變動對規則的影響（用 AI）';
+  }
+});
+
+$('btn-specs-accept').addEventListener('click', async () => {
+  const b = $('btn-specs-accept');
+  b.disabled = true;
+  try {
+    const out = await action('/api/actions/specs-accept', {});
+    alertPanel(`已把 ${(out.recorded || []).length} 份文件記為已檢視。`);
+    await runSpecs();
+  } catch (e) {
+    showError(`記錄失敗：${e.message}`);
+  } finally {
+    b.disabled = false;
+  }
+});
 
 /* ---------------- load ---------------- */
 

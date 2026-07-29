@@ -3769,3 +3769,46 @@ class SubagentRules(unittest.TestCase):
         ):
             a = self._agent(f"---\nname: x\ndescription: {desc}\n---\n\nB.\n")
             self.assertEqual(self._run(ag005, a), [], f"flagged a valid trigger: {desc!r}")
+
+
+class HookToolEventsTrackTheSpec(unittest.TestCase):
+    """`PermissionDenied` joined the tool-event family after HK004 was written.
+    An unscoped hook on it went unreported until the spec-drift check noticed the
+    documentation had changed - which is the whole point of that check."""
+
+    def _hook(self, event):
+        from studio.model import Hook
+
+        inv = Inventory()
+        inv.hooks = [
+            Hook(
+                id="h",
+                event=event,
+                matcher="*",
+                type="command",
+                command="echo hi",
+                if_rule="",
+                injects="",
+                source="/x/settings.json",
+                index=0,
+            )
+        ]
+        return inv
+
+    def test_every_documented_tool_event_is_covered(self):
+        from studio.rules.hooks import hk004
+
+        for event in (
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PermissionRequest",
+            "PermissionDenied",
+        ):
+            out = list(hk004(self._hook(event), Config(repo_root=".")))
+            self.assertEqual(len(out), 1, f"{event} is not treated as a tool event")
+
+    def test_a_non_tool_event_is_not_reported(self):
+        from studio.rules.hooks import hk004
+
+        self.assertEqual(list(hk004(self._hook("SessionStart"), Config(repo_root="."))), [])

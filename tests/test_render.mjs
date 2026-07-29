@@ -21,6 +21,9 @@ import {
   updateResultHtml,
   legendHtml,
   syncTargetSummary,
+  specsHtml,
+  specReviewHtml,
+  scheduleHtml,
   escapeHtml,
   EDGE_STYLE,
 } from '../web/render.js';
@@ -368,6 +371,67 @@ test('solid relationships are drawn without a dash pattern', () => {
 test('legend node colours come from the graph, never invented', () => {
   const html = legendHtml(['skill'], [], { skill: '#3d6fd6' }, {});
   assert.ok(html.includes('#3d6fd6'));
+});
+
+/* ---------------- spec freshness ---------------- */
+
+test('unchanged specs read as a clean result, not a to-do', () => {
+  const html = specsHtml({ specs: [{ url: 'https://x/a', status: 'unchanged', rules: ['SK001'] }], changed: [], new: [], unreachable: [] });
+  assert.ok(html.includes('都跟基準一致'));
+  assert.ok(html.includes('result ok'));
+});
+
+test('a changed spec says which rules now need re-reading', () => {
+  const html = specsHtml({
+    specs: [{ url: 'https://x/hooks', status: 'changed', rules: ['HK001', 'HK004'], note: 'since 2026-07-27' }],
+    changed: ['https://x/hooks'], new: [], unreachable: [],
+  });
+  assert.ok(html.includes('1 份規範有變動'));
+  assert.ok(html.includes('HK001') && html.includes('HK004'), 'dependent rules not named');
+});
+
+test('an unreachable spec is never reported as still valid', () => {
+  // Absence of evidence must not read as evidence of compliance - the whole
+  // discipline this tool is built on.
+  const html = specsHtml({
+    specs: [{ url: 'https://x/a', status: 'unreachable', rules: ['SK001'], note: 'timeout' }],
+    changed: [], new: [], unreachable: ['https://x/a'],
+  });
+  assert.ok(html.includes('抓不到'));
+  assert.ok(html.includes('不能當成'), 'did not warn that the run does not cover it');
+  assert.ok(!html.includes('都跟基準一致'), 'claimed everything matched while a fetch failed');
+});
+
+test('an AI review is labelled as an opinion, never an action', () => {
+  const html = specReviewHtml({
+    ok: true, url: 'https://x/hooks', summary: 'restructured',
+    reviews: [{ rule: 'HK004', verdict: 'needs-update', what_changed: 'new event', suggested_change: 'add it' }],
+  });
+  assert.ok(html.includes('HK004') && html.includes('needs-update'));
+  assert.ok(html.includes('永遠不會被自動修改'), 'did not state that rules are never auto-edited');
+});
+
+test('a failed review says so instead of rendering blank', () => {
+  assert.ok(specReviewHtml({ ok: false, error: 'no CLI' }).includes('分析失敗'));
+  assert.ok(specReviewHtml(null).includes('分析失敗'));
+});
+
+/* ---------------- schedule ---------------- */
+
+test('an uninstalled schedule shows the command that installs it', () => {
+  const html = scheduleHtml({ available: true, installed: false, install_command: 'scripts/install-launchd.sh install' });
+  assert.ok(html.includes('尚未安裝'));
+  assert.ok(html.includes('install-launchd.sh install'), 'did not say how to install it');
+});
+
+test('an installed schedule can be inspected', () => {
+  const html = scheduleHtml({ available: true, installed: true, output: 'loaded: yes' });
+  assert.ok(html.includes('已安裝'));
+  assert.ok(html.includes('loaded: yes'));
+});
+
+test('no installer available says so rather than claiming not installed', () => {
+  assert.ok(scheduleHtml({ available: false, reason: 'installer not present' }).includes('沒有排程安裝程式'));
 });
 
 /* ---------------- sync coverage ---------------- */
