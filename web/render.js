@@ -207,7 +207,7 @@ function catalogueCard(kind, r) {
           : '<span class="muted">沒有描述 —— 沒有描述就等於不會被自動觸發。</span>'
       }</div>
       <div class="cat-f">
-        <button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button>
+        <button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button>
         ${
           orphan
             ? '<span class="off">✕ 這個載入不到 —— 它不在 agent 會讀的目錄裡，叫了也不會有反應</span>'
@@ -223,7 +223,7 @@ function catalogueCard(kind, r) {
       <div class="cat-h"><b class="mono">/${escapeHtml(name)}</b>${rt}<span class="grow"></span>
         <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
       <div class="cat-d">${escapeHtml(r.description || '（這個 command 沒有描述）')}</div>
-      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><span>打 <code class="mono">/${escapeHtml(name)}</code> 執行</span>
+      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button><span>打 <code class="mono">/${escapeHtml(name)}</code> 執行</span>
         <span class="mono muted">${escapeHtml(shortPath(r.path))}</span></div>
     </article>`;
   }
@@ -232,7 +232,7 @@ function catalogueCard(kind, r) {
       <div class="cat-h"><b class="mono">${escapeHtml(name)}</b><span class="grow"></span>
         <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
       <div class="cat-d">${escapeHtml(r.description || '（沒有描述）')}</div>
-      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><span>要它做事：<code class="mono">用 ${escapeHtml(name)} agent</code></span>
+      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button><span>要它做事：<code class="mono">用 ${escapeHtml(name)} agent</code></span>
         <span class="mono muted">${escapeHtml(shortPath(r.path))}</span></div>
     </article>`;
   }
@@ -249,7 +249,7 @@ function catalogueCard(kind, r) {
     <div class="cat-h"><b class="mono">${escapeHtml(shortPath(r.path))}</b>${rt}<span class="grow"></span>
       <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
     ${r.description ? `<div class="cat-d">${escapeHtml(r.description)}</div>` : ''}
-    ${kind === 'workflows' ? `<div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><span>要用它：<code class="mono">照 ${escapeHtml(stem)} workflow 做</code></span></div>` : ''}
+    ${kind === 'workflows' ? `<div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button><span>要用它：<code class="mono">照 ${escapeHtml(stem)} workflow 做</code></span></div>` : ''}
   </article>`;
 }
 

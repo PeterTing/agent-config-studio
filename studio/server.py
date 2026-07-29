@@ -345,6 +345,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "/api/actions/update",
                 "/api/actions/specs-accept",
                 "/api/actions/specs-review",
+                "/api/actions/waive",
+                "/api/actions/quarantine",
                 "/api/actions/consolidate",
             ):
                 refusal = self._authorised()
@@ -364,6 +366,18 @@ class Handler(SimpleHTTPRequestHandler):
                     return self._send(self._specs_accept())
                 if route == "/api/actions/specs-review":
                     return self._send(self._specs_review(self._body().get("urls") or []))
+                if route == "/api/actions/waive":
+                    b = self._body()
+                    return self._send(
+                        self._waive(
+                            b.get("rule") or "",
+                            b.get("path") or "",
+                            b.get("reason") or "",
+                            bool(b.get("remove")),
+                        )
+                    )
+                if route == "/api/actions/quarantine":
+                    return self._send(self._quarantine(self._body().get("path") or ""))
                 if route == "/api/actions/consolidate":
                     body = self._body()
                     return self._send(
@@ -601,6 +615,90 @@ class Handler(SimpleHTTPRequestHandler):
         states = specs_mod.check(self.repo_root, allow_network=True)
         path = specs_mod.record(self.repo_root, states)
         return {"baseline": path, "recorded": [s.url for s in states if s.current_hash]}
+
+    def _waive(self, rule: str, path: str, reason: str, remove: bool = False) -> dict:
+        """Record - or withdraw - a decision not to fix a finding.
+
+        A waiver is a decision on the record, not a mute button, so a reason is
+        required. Written through the same backed-up change set as every other
+        write, and the path is stored in `~` form so the file stays portable.
+        """
+        if not rule or not path:
+            return {"error": "rule and path are required"}
+        if not remove and not reason.strip():
+            return {"error": "豁免一定要寫理由 —— 沒有理由的豁免就只是把它靜音。"}
+
+        gov = os.path.join(self.repo_root, "canonical", "governance.json")
+        try:
+            with open(gov, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            data = {}
+        except (OSError, ValueError) as exc:
+            return {"error": f"讀不到 governance.json：{exc}"}
+        if not isinstance(data, dict):
+            return {"error": "governance.json 不是一個物件，先修好它再試"}
+
+        home = os.path.expanduser("~")
+        stored = path.replace(home, "~", 1) if path.startswith(home) else path
+        waivers = [w for w in (data.get("waivers") or []) if isinstance(w, dict)]
+        waivers = [w for w in waivers if not (w.get("rule") == rule and w.get("path") == stored)]
+        if not remove:
+            waivers.append({"rule": rule, "path": stored, "reason": reason.strip()})
+        data["waivers"] = waivers
+
+        cs = patch.ChangeSet(
+            name="waive" if not remove else "unwaive",
+            description=(
+                f"Record a waiver for {rule} on {stored}."
+                if not remove
+                else f"Withdraw the waiver for {rule} on {stored}."
+            ),
+            changes=[
+                patch.Change(
+                    path=gov,
+                    new_text=json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    reason="waiver change from the dashboard",
+                )
+            ],
+        )
+        result = patch.apply(cs, self.repo_root)
+        return {"waivers": len(waivers), "backup": result["backup"], "removed": remove}
+
+    def _quarantine(self, path: str) -> dict:
+        """Move one config file into the repo's quarantine.
+
+        Copy first, then remove, both inside one backed-up change set - so the
+        file exists in two places before it exists in neither, and rollback puts
+        it back exactly.
+        """
+        if not path:
+            return {"error": "path required"}
+        full = os.path.abspath(os.path.expanduser(path))
+        inv = _inventory(False)
+        allowed = [os.path.abspath(r) for r in inv.roots.values() if r]
+        if not any(full.startswith(a + os.sep) for a in allowed):
+            return {"error": "path outside the audited config roots"}
+        if not os.path.isfile(full):
+            return {"error": "not a file"}
+        try:
+            text = open(full, encoding="utf-8").read()
+        except UnicodeDecodeError:
+            return {"error": "不是 UTF-8 文字檔，變更集載不了，請自己搬"}
+
+        dest = os.path.join(self.repo_root, "var", "quarantine", full.lstrip("/"))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        cs = patch.ChangeSet(
+            name="quarantine-file",
+            description=f"Move {os.path.basename(full)} out of the live config tree.",
+            changes=[
+                patch.Change(path=dest, new_text=text, action="create", reason="quarantined copy"),
+                patch.Change(path=full, new_text="", action="delete", reason="quarantined"),
+            ],
+        )
+        result = patch.apply(cs, self.repo_root)
+        _fresh_inventory()
+        return {"quarantined": full, "copy": dest, "backup": result["backup"]}
 
     def _specs_review(self, urls: list[str]) -> dict:
         """Ask what changed and whether the dependent rules still hold.

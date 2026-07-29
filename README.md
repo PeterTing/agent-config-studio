@@ -432,7 +432,7 @@ studio/
 web/            dashboard; hand-rolled force-directed graph, no CDN
 canonical/      your instruction sources + governance declarations
 examples/       worked remediation scripts built on studio.patch
-tests/          320 tests (269 Python + 51 dashboard), standard library unittest
+tests/          328 tests (277 Python + 51 dashboard), standard library unittest
 ```
 
 ## Writing your own checks
@@ -472,7 +472,7 @@ is well-formed, reachable, non-duplicated and affordable.
 python3 -m unittest discover -s tests -t .
 ```
 
-320 tests (269 Python + 51 dashboard). Four groups are worth singling out.
+328 tests (277 Python + 51 dashboard). Four groups are worth singling out.
 
 The hook tests run real shell commands against throwaway git repositories,
 because the defect they exist to prevent is a condition that fires when there is

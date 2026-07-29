@@ -336,12 +336,21 @@ function renderFindings() {
         label: '動作',
         get: (f) => {
           const info = ((state.fixes || {}).fixes || {})[f.key];
-          if (!info) return '';
-          if (!info.fixable) {
-            return `<span class="muted" style="font-size:11.5px" title="${escapeHtml(info.why)}">需人工判斷</span>`;
-          }
           const dis = session.allow_actions ? '' : 'disabled';
-          return `<button data-fixkey="${escapeHtml(f.key)}" ${dis} title="${escapeHtml(info.detail)}">${escapeHtml(info.label)}</button>`;
+          // A waiver is available on every finding, fixable or not: deciding not
+          // to fix something is itself a management action, and it was the one
+          // the dashboard had no way to record.
+          const waive = f.waived
+            ? `<button class="linkish" data-unwaive="${escapeHtml(f.rule)}" data-path="${escapeHtml(f.path)}" ${dis}>取消豁免</button>`
+            : `<button class="linkish" data-waive="${escapeHtml(f.rule)}" data-path="${escapeHtml(f.path)}" ${dis}>記錄豁免</button>`;
+          let main = '';
+          if (!info) main = '';
+          else if (!info.fixable) {
+            main = `<span class="muted" style="font-size:11.5px" title="${escapeHtml(info.why)}">需人工判斷</span>`;
+          } else {
+            main = `<button data-fixkey="${escapeHtml(f.key)}" ${dis} title="${escapeHtml(info.detail)}">${escapeHtml(info.label)}</button>`;
+          }
+          return `${main}<div style="margin-top:5px">${waive}</div>`;
         },
       },
     ],
@@ -349,6 +358,19 @@ function renderFindings() {
   );
 
   $('tbl-findings').onclick = async (ev) => {
+    const w = ev.target.closest('button[data-waive], button[data-unwaive]');
+    if (w) {
+      try {
+        if (w.hasAttribute('data-unwaive')) {
+          await removeWaiver(w.dataset.unwaive, w.dataset.path);
+        } else {
+          askWaiverReason(w.dataset.waive, w.dataset.path);
+        }
+      } catch (e) {
+        showError(`豁免失敗：${e.message}`);
+      }
+      return;
+    }
     const btn = ev.target.closest('button[data-fixkey]');
     if (!btn) return;
     const cell = btn.closest('td');
@@ -375,6 +397,68 @@ function renderFindings() {
       cell.appendChild(btn);
     }
   };
+}
+
+/* Waivers go through the same backed-up path as every other change.
+ *
+ * The reason is collected inline, not with window.prompt: a browser dialog
+ * blocks the whole page, which is the same objection that removed confirm()
+ * from the update flow. */
+function askWaiverReason(rule, path) {
+  const host = $('fix-result');
+  host.hidden = false;
+  host.className = 'panel result';
+  host.innerHTML = `<div class="body">
+      <b>為什麼決定不修 <span class="mono">${escapeHtml(rule)}</span>？</b>
+      <div class="sub" style="margin:4px 0 8px">
+        豁免是留在紀錄上的決定，不是靜音鍵 —— 理由會寫進 canonical/governance.json，
+        之後任何人（包括未來的你）看得到當初為什麼這樣決定。
+      </div>
+      <input id="waive-reason" placeholder="例如：gstack 上游的問題，已回報，等它修" style="width:100%;max-width:560px" />
+      <div style="margin-top:9px;display:flex;gap:8px">
+        <button id="waive-go" class="primary">記錄豁免</button>
+        <button id="waive-cancel">取消</button>
+      </div>
+    </div>`;
+  host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  const input = $('waive-reason');
+  input.focus();
+
+  const submit = async () => {
+    const reason = input.value.trim();
+    if (!reason) {
+      input.focus();
+      showError('沒有寫理由，沒有記錄。');
+      return;
+    }
+    try {
+      await action('/api/actions/waive', { rule, path, reason });
+      pinResult(
+        `<b>✓ 已記錄豁免</b><div><span class="mono">${escapeHtml(rule)}</span> 之後不再列入判準。` +
+          '理由存在 <code class="mono">canonical/governance.json</code>，隨時可以取消。</div>',
+        'ok',
+      );
+      await loadAll(true);
+    } catch (e) {
+      showError(`豁免失敗：${e.message}`);
+    }
+  };
+  $('waive-go').onclick = submit;
+  input.onkeydown = (ev) => {
+    if (ev.key === 'Enter') submit();
+  };
+  $('waive-cancel').onclick = () => {
+    host.hidden = true;
+  };
+}
+
+async function removeWaiver(rule, path) {
+  await action('/api/actions/waive', { rule, path, remove: true });
+  pinResult(
+    `<b>✓ 已取消豁免</b><div><span class="mono">${escapeHtml(rule)}</span> 重新列入判準。</div>`,
+    'ok',
+  );
+  await loadAll(true);
 }
 
 /** 釘一張結果卡在 findings 表格正上方，不會自己消失，也不需要捲到頁首才看得到。 */
@@ -870,6 +954,8 @@ for (const id of ['i-kind', 'i-origin', 'i-search', 'i-cards']) $(id).addEventLi
 /* Reading a file was the missing half of "read and manage": the catalogue could
  * tell you a skill's trigger but never let you see what it actually does. */
 $('cards-inventory').addEventListener('click', async (ev) => {
+  const q = ev.target.closest('button[data-quarantine]');
+  if (q) return quarantineFile(q.dataset.quarantine, q);
   const btn = ev.target.closest('button[data-peek]');
   if (!btn) return;
   const path = btn.dataset.peek;
@@ -895,6 +981,50 @@ $('cards-inventory').addEventListener('click', async (ev) => {
     host.innerHTML = `<div class="body"><div class="result bad"><b>讀不到</b><div>${escapeHtml(e.message)}</div></div></div>`;
   }
 });
+
+/* Moving a file out is the action the catalogue was missing: CB007 could report
+ * 71 never-invoked skills and there was no way to act on any of them.
+ *
+ * Quarantine rather than delete, and per file rather than in bulk: "never
+ * invoked" means "has not come up yet", not "useless", so this stays one
+ * deliberate decision at a time. */
+async function quarantineFile(path, btn) {
+  const host = $('peek');
+  host.hidden = false;
+  host.innerHTML = `<div class="body">
+      <b>把 <span class="mono">${escapeHtml(path)}</span> 移出設定目錄？</b>
+      <div class="sub" style="margin:4px 0 8px">
+        會複製到本 repo 的 <code class="mono">var/quarantine/</code> 再從設定樹移除，
+        <b>不是刪除</b>，而且有還原點。agent 之後就看不到它了。
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="q-go" class="primary">確定隔離</button>
+        <button id="q-cancel">取消</button>
+      </div>
+    </div>`;
+  host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  $('q-cancel').onclick = () => {
+    host.hidden = true;
+  };
+  $('q-go').onclick = async () => {
+    host.innerHTML = '<div class="body"><span class="running"><span class="spin"></span>隔離中…</span></div>';
+    try {
+      const r = await action('/api/actions/quarantine', { path });
+      host.innerHTML = `<div class="body"><div class="result ok">
+          <b>✓ 已隔離</b>
+          <div>副本在 <span class="mono">${escapeHtml(shortPath(r.copy))}</span></div>
+          <div class="sub">要拿回來：到「同步狀態」分頁按還原點 <span class="mono">${escapeHtml((r.backup || '').split('/').pop())}</span> 的「還原」。</div>
+          <button class="dismiss" type="button">知道了</button>
+        </div></div>`;
+      host.querySelector('.dismiss').onclick = () => {
+        host.hidden = true;
+      };
+      await loadAll(true);
+    } catch (e) {
+      host.innerHTML = `<div class="body"><div class="result bad"><b>隔離失敗</b><div>${escapeHtml(e.message)}</div></div></div>`;
+    }
+  };
+}
 
 /* ---------------- sync ---------------- */
 

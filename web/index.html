@@ -16,21 +16,21 @@
       <button id="btn-check" class="primary">執行健檢</button>
     </header>
 
-    <nav id="tabs">
-      <button data-tab="overview" aria-selected="true">總覽</button>
-      <button data-tab="graph" aria-selected="false">關聯圖</button>
-      <button data-tab="findings" aria-selected="false">合規問題 <span class="count" id="tab-findings-count"></span></button>
-      <button data-tab="plugins" aria-selected="false">套件與更新 <span class="count" id="tab-updates-count"></span></button>
-      <button data-tab="inventory" aria-selected="false">清單</button>
-      <button data-tab="specs" aria-selected="false">規範與排程 <span class="count" id="tab-specs-count"></span></button>
-      <button data-tab="sync" aria-selected="false">同步狀態</button>
+    <nav id="tabs" role="tablist" aria-label="主要分頁">
+      <button data-tab="overview" role="tab" aria-controls="tab-overview" aria-selected="true">總覽</button>
+      <button data-tab="graph" role="tab" aria-controls="tab-graph" aria-selected="false">關聯圖</button>
+      <button data-tab="findings" role="tab" aria-controls="tab-findings" aria-selected="false">合規問題 <span class="count" id="tab-findings-count"></span></button>
+      <button data-tab="plugins" role="tab" aria-controls="tab-plugins" aria-selected="false">套件與更新 <span class="count" id="tab-updates-count"></span></button>
+      <button data-tab="inventory" role="tab" aria-controls="tab-inventory" aria-selected="false">清單</button>
+      <button data-tab="specs" role="tab" aria-controls="tab-specs" aria-selected="false">規範與排程 <span class="count" id="tab-specs-count"></span></button>
+      <button data-tab="sync" role="tab" aria-controls="tab-sync" aria-selected="false">同步狀態</button>
     </nav>
 
     <main>
       <div id="error" class="banner err" hidden></div>
 
       <!-- ---------------- overview ---------------- -->
-      <section id="tab-overview">
+      <section id="tab-overview" role="tabpanel" aria-label="overview">
         <div id="status" class="status">
           <div class="status-mark" id="status-mark">–</div>
           <div class="status-body">
@@ -88,9 +88,9 @@
       </section>
 
       <!-- ---------------- graph ---------------- -->
-      <section id="tab-graph" hidden>
+      <section id="tab-graph" role="tabpanel" aria-label="graph" hidden>
         <div class="filters">
-          <label>種類</label>
+          <label for="g-kind">種類</label>
           <select id="g-kind">
             <option value="">全部</option>
             <option value="instruction">instruction</option>
@@ -101,7 +101,7 @@
             <option value="hook">hook</option>
             <option value="plugin">plugin</option>
           </select>
-          <label>Runtime</label>
+          <label for="g-runtime">Runtime</label>
           <select id="g-runtime">
             <option value="">全部</option>
             <option value="claude">claude</option>
@@ -110,13 +110,13 @@
           </select>
           <label><input type="checkbox" id="g-expand" /> 展開 plugin skill</label>
           <label><input type="checkbox" id="g-connected" checked /> 只看有連線的</label>
-          <input id="g-search" placeholder="搜尋名稱…" style="min-width: 150px" />
+          <input id="g-search" aria-label="搜尋節點名稱" placeholder="搜尋名稱…" style="min-width: 150px" />
           <button id="g-reset">重置視角</button>
           <span class="muted" id="g-stats" style="font-size: 12px"></span>
         </div>
         <div class="graph-wrap">
           <div>
-            <svg id="graph"></svg>
+            <svg id="graph" role="img" aria-label="設定關聯圖，節點與連線的視覺呈現；詳細內容請看下方節點詳情"></svg>
             <div class="legend" id="legend"></div>
           </div>
           <div class="panel" style="margin-top: 0">
@@ -127,25 +127,25 @@
       </section>
 
       <!-- ---------------- findings ---------------- -->
-      <section id="tab-findings" hidden>
+      <section id="tab-findings" role="tabpanel" aria-label="findings" hidden>
         <div class="filters">
-          <label>嚴重度</label>
+          <label for="f-sev">嚴重度</label>
           <select id="f-sev">
             <option value="">全部</option>
             <option value="critical">critical</option>
             <option value="important">important</option>
             <option value="minor">minor</option>
           </select>
-          <label>歸屬</label>
+          <label for="f-owner">歸屬</label>
           <select id="f-owner">
             <option value="">全部</option>
             <option value="local">local（你能修）</option>
             <option value="vendor">vendor（升級才會變）</option>
           </select>
-          <label>分類</label>
+          <label for="f-cat">分類</label>
           <select id="f-cat"><option value="">全部</option></select>
           <label><input type="checkbox" id="f-blocking" /> 只看阻斷性</label>
-          <input id="f-search" placeholder="搜尋規則 / 路徑 / 內容…" style="min-width: 200px" />
+          <input id="f-search" aria-label="搜尋規則、路徑或內容" placeholder="搜尋規則 / 路徑 / 內容…" style="min-width: 200px" />
           <span class="muted" id="f-stats" style="font-size: 12px"></span>
         </div>
         <div class="filters" id="fixbar">
@@ -164,7 +164,7 @@
       </section>
 
       <!-- ---------------- plugins ---------------- -->
-      <section id="tab-plugins" hidden>
+      <section id="tab-plugins" role="tabpanel" aria-label="plugins" hidden>
         <div class="filters">
           <button id="btn-updates" class="primary">檢查雲端更新</button>
           <span class="muted" id="u-stats" style="font-size: 12px"></span>
@@ -184,9 +184,9 @@
       </section>
 
       <!-- ---------------- inventory ---------------- -->
-      <section id="tab-inventory" hidden>
+      <section id="tab-inventory" role="tabpanel" aria-label="inventory" hidden>
         <div class="filters">
-          <label>種類</label>
+          <label for="i-kind">種類</label>
           <select id="i-kind">
             <option value="skills">skills</option>
             <option value="instructions">instructions</option>
@@ -195,7 +195,7 @@
             <option value="agents">agents</option>
             <option value="hooks">hooks</option>
           </select>
-          <label>來源</label>
+          <label for="i-origin">來源</label>
           <select id="i-origin">
             <option value="usable">可取用的（預設）</option>
             <option value="">全部（含載入不到的）</option>
@@ -204,7 +204,7 @@
             <option value="plugin">只看 plugin 帶的</option>
             <option value="orphan-library">只看載入不到的</option>
           </select>
-          <input id="i-search" placeholder="搜尋名稱或用途…" style="min-width: 220px" />
+          <input id="i-search" aria-label="搜尋名稱或用途" placeholder="搜尋名稱或用途…" style="min-width: 220px" />
           <label class="chk"><input type="checkbox" id="i-cards" checked /> 目錄檢視</label>
           <span class="muted" id="i-stats" style="font-size: 12px"></span>
         </div>
@@ -218,7 +218,7 @@
       </section>
 
       <!-- ---------------- specs & schedule ---------------- -->
-      <section id="tab-specs" hidden>
+      <section id="tab-specs" role="tabpanel" aria-label="specs" hidden>
         <div class="panel">
           <h2>這頁在做什麼</h2>
           <div class="body">
@@ -249,7 +249,7 @@
       </section>
 
       <!-- ---------------- sync ---------------- -->
-      <section id="tab-sync" hidden>
+      <section id="tab-sync" role="tabpanel" aria-label="sync" hidden>
         <div class="panel">
           <h2>這頁在做什麼</h2>
           <div class="body">

@@ -3812,3 +3812,89 @@ class HookToolEventsTrackTheSpec(unittest.TestCase):
         from studio.rules.hooks import hk004
 
         self.assertEqual(list(hk004(self._hook("SessionStart"), Config(repo_root="."))), [])
+
+
+class DashboardAccessibility(unittest.TestCase):
+    """Accessibility was the one area the QA pass marked Not covered. These are
+    static checks over the shipped markup and stylesheet, so a regression fails
+    the suite rather than waiting for someone to notice with a keyboard."""
+
+    def setUp(self):
+        self.html = open("web/index.html", encoding="utf-8").read()
+        self.css = open("web/style.css", encoding="utf-8").read()
+
+    def test_the_page_declares_a_language(self):
+        self.assertIn('lang="', self.html.split(">", 2)[1] + ">")
+
+    def test_every_tab_is_wired_to_its_panel(self):
+        import re
+
+        tabs = re.findall(r'<button data-tab="([a-z]+)"[^>]*aria-controls="([^"]+)"', self.html)
+        self.assertTrue(tabs, "no tab declares aria-controls")
+        for name, controls in tabs:
+            self.assertEqual(controls, f"tab-{name}")
+            self.assertIn(f'id="{controls}"', self.html, f"{controls} is not a real element")
+
+    def test_tab_roles_are_declared(self):
+        """Matched as real attributes. A plain substring check passes on
+        `data-role="tablist"`, which announces nothing."""
+        import re
+
+        for role in ("tablist", "tab", "tabpanel"):
+            self.assertRegex(
+                self.html,
+                rf'(?<![-\w]){re.escape("role")}="{role}"',
+                f'no element declares role="{role}" as an attribute',
+            )
+
+    def test_every_select_has_a_label_bound_to_it(self):
+        """A visible `<label>` that is not bound to its control announces nothing."""
+        import re
+
+        for select_id in re.findall(r'<select id="([^"]+)"', self.html):
+            bound = f'for="{select_id}"' in self.html
+            aria = re.search(rf'<select id="{select_id}"[^>]*aria-label=', self.html)
+            self.assertTrue(bound or aria, f"{select_id} has no associated label")
+
+    def test_every_text_input_is_named(self):
+        import re
+
+        for m in re.finditer(r'<input id="([^"]+)"([^>]*)>', self.html):
+            input_id, rest = m.group(1), m.group(2)
+            if 'type="checkbox"' in rest:
+                continue  # those sit inside a <label>
+            named = f'for="{input_id}"' in self.html or "aria-label=" in rest
+            self.assertTrue(named, f"{input_id} has no accessible name")
+
+    def test_keyboard_focus_is_visible(self):
+        """There were no :focus rules at all, so a keyboard user could not tell
+        which control they were on.
+
+        Targets the unscoped rule and checks it actually draws. Searching the
+        whole stylesheet was not enough: `outline-offset` alone satisfied a
+        looser check, and so did the `@supports not selector(:focus-visible)`
+        fallback, which by definition never applies where the primary rule does.
+        """
+        import re
+
+        m = re.search(r"(?m)^:focus-visible\s*\{([^}]*)\}", self.css)
+        self.assertIsNotNone(m, "no unscoped :focus-visible rule")
+        # The value is read out and compared, not matched with a negative
+        # lookahead: `\s*` can match zero characters, which let the lookahead sit
+        # before the space and happily match " none".
+        values = [
+            v.strip()
+            for prop, v in re.findall(r"\b(outline)\s*:\s*([^;]+)", m.group(1))
+            if prop == "outline"
+        ]
+        self.assertTrue(values, "the global :focus-visible rule sets no outline")
+        self.assertTrue(
+            any(v and v.split()[0] not in ("none", "0", "hidden") for v in values),
+            f"the global :focus-visible rule draws nothing: outline is {values!r}",
+        )
+
+    def test_a_fallback_exists_for_browsers_without_focus_visible(self):
+        self.assertIn("@supports not selector(:focus-visible)", self.css)
+
+    def test_the_graph_svg_has_an_accessible_name(self):
+        self.assertRegex(self.html, r'<svg id="graph"[^>]*aria-label="')

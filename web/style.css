@@ -409,3 +409,23 @@ button.linkish {
 #peek pre { max-height: 60vh; overflow: auto; font-size: 12px; }
 #peek .peek-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
 #peek .peek-head .grow { flex: 1 1 auto; }
+button.linkish.danger { color: var(--bad); }
+button.linkish + button.linkish { margin-left: 10px; }
+
+/* ---------- 鍵盤焦點 ----------
+   原本完全沒有 :focus 樣式，用鍵盤操作的人看不出焦點在哪個元素上。
+   用 :focus-visible，滑鼠點擊不會出現外框，鍵盤 Tab 才會。 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+nav#tabs button:focus-visible { outline-offset: -2px; }
+.cat button.linkish:focus-visible { outline-offset: 1px; }
+/* 不支援 :focus-visible 的瀏覽器至少還有可見焦點 */
+@supports not selector(:focus-visible) {
+  a:focus, button:focus, input:focus, select:focus, [tabindex]:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
