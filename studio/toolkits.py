@@ -130,8 +130,13 @@ def discover(skills_dirs: list[str]) -> list[Toolkit]:
                         manages.append(sub)
             except OSError:
                 pass
-            if manages:
-                # The toolkit's own directory is part of what it installs.
+            # The toolkit's own directory is part of what it installs, whether or
+            # not it also ships nested skills. Gating this on `manages` meant a
+            # checkout whose only skill is its root SKILL.md owned nothing, so
+            # every symlink pointing at that root was classified LOCAL - and one
+            # gstack release turned that into five blocking findings on a file
+            # the user does not own.
+            if manages or os.path.isfile(os.path.join(root, "SKILL.md")):
                 manages.append(entry)
             out.append(
                 Toolkit(
@@ -200,9 +205,33 @@ def check_updates(toolkits: list[Toolkit], *, allow_network: bool = True) -> lis
 
 
 def managed_paths(toolkits: list[Toolkit]) -> set[str]:
-    """Absolute SKILL.md paths owned by any discovered toolkit."""
+    """Absolute SKILL.md paths owned by any discovered toolkit.
+
+    Resolved through symlinks as well as by name: a toolkit installs its skills
+    as links from the skills directory into its own checkout, and a link whose
+    directory name does not match any managed entry - gstack's
+    `_gstack-command` -> `gstack/SKILL.md` - would otherwise read as content the
+    user wrote.
+    """
     out: set[str] = set()
+    roots: list[str] = []
     for tk in toolkits:
         for name in tk.manages:
             out.add(os.path.join(tk.install_dir, name, "SKILL.md"))
+        if tk.root:
+            roots.append(os.path.realpath(tk.root))
+        out.add(os.path.join(tk.root, "SKILL.md"))
+
+    for tk in toolkits:
+        try:
+            entries = os.listdir(tk.install_dir)
+        except OSError:
+            continue
+        for entry in entries:
+            candidate = os.path.join(tk.install_dir, entry, "SKILL.md")
+            if not os.path.islink(candidate) and not os.path.isfile(candidate):
+                continue
+            target = os.path.realpath(candidate)
+            if any(target == os.path.join(r, "SKILL.md") or target.startswith(r + os.sep) for r in roots):
+                out.add(candidate)
     return out

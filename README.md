@@ -368,7 +368,9 @@ makes a daily scheduled check practical.
 ## Scheduled health checks
 
 ```bash
-scripts/install-launchd.sh install   # daily 09:20
+scripts/install-launchd.sh install   # daily 09:20 — runs the rules,
+                                     # checks remote updates, and re-fetches
+                                     # every document the rules cite
 scripts/install-launchd.sh status    # loaded? drifted from the repo? last verdict?
 scripts/install-launchd.sh run-now   # trigger once and wait for the result
 ```
@@ -432,7 +434,7 @@ studio/
 web/            dashboard; hand-rolled force-directed graph, no CDN
 canonical/      your instruction sources + governance declarations
 examples/       worked remediation scripts built on studio.patch
-tests/          328 tests (277 Python + 51 dashboard), standard library unittest
+tests/          334 tests (283 Python + 51 dashboard), standard library unittest
 ```
 
 ## Writing your own checks
@@ -472,7 +474,7 @@ is well-formed, reachable, non-duplicated and affordable.
 python3 -m unittest discover -s tests -t .
 ```
 
-328 tests (277 Python + 51 dashboard). Four groups are worth singling out.
+334 tests (283 Python + 51 dashboard). Four groups are worth singling out.
 
 The hook tests run real shell commands against throwaway git repositories,
 because the defect they exist to prevent is a condition that fires when there is

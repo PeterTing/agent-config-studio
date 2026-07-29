@@ -33,6 +33,11 @@ class HealthReport:
     rules_run: int = 0
     usage: dict = field(default_factory=dict)
     updates: dict = field(default_factory=dict)
+    #: Spec-drift result, when the run checked it. Carried in the report so the
+    #: scheduled run surfaces a moved specification without anyone pressing a
+    #: button - "check periodically whether the guidance changed" is only true
+    #: if something checks it periodically.
+    specs: dict = field(default_factory=dict)
     #: Measurements that are context, not violations - a limit here would be
     #: unsatisfiable, so they are reported rather than graded.
     metrics: dict = field(default_factory=dict)
@@ -136,7 +141,14 @@ def _metrics(inv: Inventory, cfg: Config) -> dict:
     }
 
 
-def run(inv: Inventory, cfg: Config, *, usage: dict | None = None, updates: dict | None = None) -> HealthReport:
+def run(
+    inv: Inventory,
+    cfg: Config,
+    *,
+    usage: dict | None = None,
+    updates: dict | None = None,
+    specs: dict | None = None,
+) -> HealthReport:
     findings = run_all(inv, cfg)
     blocking = _blocking(findings)
 
@@ -171,6 +183,7 @@ def run(inv: Inventory, cfg: Config, *, usage: dict | None = None, updates: dict
         inventory_counts=inv.counts(),
         rules_run=len(REGISTRY),
         usage=usage or {},
+        specs=specs or {},
         updates=updates or {},
         metrics=_metrics(inv, cfg),
         scan_errors=list(inv.scan_errors),

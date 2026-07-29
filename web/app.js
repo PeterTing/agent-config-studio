@@ -172,6 +172,22 @@ function renderStatus() {
   } else if (updateCount > 0) {
     items.push(`<b>${updateCount} 個可用更新</b>，詳見「套件與更新」分頁。`);
   }
+
+  // Spec drift comes from the report itself, so the daily run surfaces a moved
+  // specification here without anyone opening a tab. A rule built on last year's
+  // guidance goes wrong silently; this is the only thing that says so.
+  const sp = h.specs || {};
+  if ((sp.changed || []).length) {
+    items.push(
+      `<b>${sp.changed.length} 份官方規範已改版</b> —— 依據它們的規則要重新確認。` +
+        '到「規範與排程」分頁看是哪幾條。',
+    );
+  }
+  if ((sp.unreachable || []).length) {
+    items.push(
+      `<b>${sp.unreachable.length} 份規範抓不到</b> —— 這次沒檢查到，不能當成規則都還正確。`,
+    );
+  }
   actions.innerHTML = items.map((s) => `<li>${s}</li>`).join('');
 }
 

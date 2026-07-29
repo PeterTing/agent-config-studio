@@ -335,7 +335,9 @@ it should. `--accept` is you saying you looked.
 ## Scheduled checks
 
 ```bash
-scripts/install-launchd.sh install   # daily 09:20
+scripts/install-launchd.sh install   # daily 09:20 — runs the rules,
+                                     # checks remote updates, and re-fetches
+                                     # every document the rules cite
 scripts/install-launchd.sh status    # loaded? drifted from the repo? last verdict?
 scripts/install-launchd.sh run-now   # trigger once and wait
 ```

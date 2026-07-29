@@ -17,6 +17,7 @@
     <string>studio.cli</string>
     <string>health</string>
     <string>--with-updates</string>
+      <string>--with-specs</string>
   </array>
 
   <key>WorkingDirectory</key>

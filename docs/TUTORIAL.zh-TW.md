@@ -294,7 +294,8 @@ python3 -m studio.cli specs --accept    # 把目前內容記為新基準
 ## 定期健檢
 
 ```bash
-scripts/install-launchd.sh install   # 每天 09:20
+scripts/install-launchd.sh install   # 每天 09:20 —— 跑規則、查遠端更新、
+                                     # 並重新抓取每份被引用的規範
 scripts/install-launchd.sh status    # 有載入嗎？跟 repo 有沒有落差？上次結論？
 scripts/install-launchd.sh run-now   # 立刻跑一次並等結果
 ```

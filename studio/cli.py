@@ -180,7 +180,21 @@ def cmd_health(args) -> int:
     if args.with_updates:
         update_summary = updates_mod.check(inv, allow_network=not args.offline).summary()
 
-    report = health.run(inv, cfg, usage=usage_summary, updates=update_summary)
+    spec_summary: dict = {}
+    if getattr(args, "with_specs", False) and not args.offline:
+        from . import specs as specs_mod
+
+        states = specs_mod.check(REPO_ROOT, allow_network=True)
+        spec_summary = {
+            "checked": len(states),
+            "changed": [s.url for s in states if s.status == "changed"],
+            "new": [s.url for s in states if s.status == "new"],
+            "unreachable": [s.url for s in states if s.status == "unreachable"],
+        }
+
+    report = health.run(
+        inv, cfg, usage=usage_summary, updates=update_summary, specs=spec_summary
+    )
     saved = health.save(report, REPO_ROOT)
 
     if args.json:
@@ -538,6 +552,11 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--show-waived", action="store_true")
     h.add_argument("--no-usage", action="store_true", help="skip building the usage index")
     h.add_argument("--with-updates", action="store_true", help="also check plugin updates")
+    h.add_argument(
+        "--with-specs",
+        action="store_true",
+        help="also check whether the documents the rules cite have changed",
+    )
     h.add_argument("--offline", action="store_true")
     h.set_defaults(fn=cmd_health)
 

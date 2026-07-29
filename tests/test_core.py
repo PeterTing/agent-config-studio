@@ -3898,3 +3898,96 @@ class DashboardAccessibility(unittest.TestCase):
 
     def test_the_graph_svg_has_an_accessible_name(self):
         self.assertRegex(self.html, r'<svg id="graph"[^>]*aria-label="')
+
+
+class ScheduledRunChecksTheGuidance(unittest.TestCase):
+    """"Check periodically whether the guidance changed" is only true if
+    something checks it periodically. The daily job ran the rules but never
+    re-fetched the documents those rules are built on."""
+
+    def test_the_installed_schedule_checks_specs(self):
+        import plistlib
+
+        path = os.path.join("launchd", "com.agent-config-studio.healthcheck.plist")
+        with open(path, "rb") as fh:
+            data = plistlib.load(fh)
+        args = data["ProgramArguments"]
+        self.assertIn("--with-updates", args, "the daily run does not check remote updates")
+        self.assertIn("--with-specs", args, "the daily run does not check the cited guidance")
+
+    def test_health_carries_the_spec_result(self):
+        from studio.health import HealthReport
+
+        report = HealthReport(
+            generated_at="now",
+            verdict="PASS",
+            findings=[],
+            specs={"checked": 6, "changed": ["https://x/hooks"], "new": [], "unreachable": []},
+        )
+        payload = report.to_dict()
+        self.assertEqual(payload["specs"]["changed"], ["https://x/hooks"])
+
+    def test_a_run_without_the_flag_reports_no_spec_result(self):
+        """Absence of a check must not look like a clean check."""
+        from studio.health import HealthReport
+
+        self.assertEqual(HealthReport(generated_at="n", verdict="PASS", findings=[]).to_dict()["specs"], {})
+
+
+class ToolkitOwnsItsRootSkill(unittest.TestCase):
+    """A checkout whose only skill is its root SKILL.md owned nothing, so every
+    symlink pointing at that root read as content the user wrote. One gstack
+    release turned that into five blocking findings on a file they do not own."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.skills = os.path.join(self._tmp.name, "skills")
+        self.root = os.path.join(self.skills, "kit")
+        os.makedirs(self.root)
+        with open(os.path.join(self.root, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: kit\ndescription: Router. Use when asked.\n---\n\nBody.\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _toolkit(self):
+        from studio.toolkits import Toolkit
+
+        return Toolkit(
+            name="kit",
+            root=self.root,
+            install_dir=self.skills,
+            remote="",
+            local_version="1.0.0",
+            commit="abc",
+            manages=["kit"],
+        )
+
+    def test_the_root_skill_is_owned(self):
+        from studio.toolkits import managed_paths
+
+        owned = managed_paths([self._toolkit()])
+        self.assertIn(os.path.join(self.root, "SKILL.md"), owned)
+
+    def test_a_symlink_into_the_checkout_is_owned_whatever_it_is_called(self):
+        """gstack links `_gstack-command/SKILL.md` at its root SKILL.md; the
+        directory name matches no managed entry."""
+        from studio.toolkits import managed_paths
+
+        alias = os.path.join(self.skills, "_kit-command")
+        os.makedirs(alias)
+        link = os.path.join(alias, "SKILL.md")
+        os.symlink(os.path.join(self.root, "SKILL.md"), link)
+
+        self.assertIn(link, managed_paths([self._toolkit()]))
+
+    def test_an_unrelated_local_skill_is_not_claimed(self):
+        from studio.toolkits import managed_paths
+
+        mine = os.path.join(self.skills, "my-own")
+        os.makedirs(mine)
+        path = os.path.join(mine, "SKILL.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("---\nname: my-own\ndescription: Mine. Use when asked.\n---\n")
+
+        self.assertNotIn(path, managed_paths([self._toolkit()]))
