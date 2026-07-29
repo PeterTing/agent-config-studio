@@ -14,7 +14,7 @@ This is a local, read-only-by-default tool that answers four questions about
 | --- | --- |
 | **What is installed?** | Every skill, instruction file, workflow, command, subagent, hook and plugin, with its real provenance |
 | **How is it wired together?** | An interactive graph of references, invocations, mirrors, generated files, duplicates and name collisions |
-| **Does it follow the published guidance?** | 51 checks, each citing the documented requirement it enforces |
+| **Does it follow the published guidance?** | 56 checks, each citing the documented requirement it enforces |
 | **Is anything out of date?** | Marketplace plugins and git-checkout skill toolkits, compared against their remotes |
 
 No dependencies. No telemetry. Nothing leaves your machine unless you ask for an
@@ -253,7 +253,7 @@ run at all below full coverage.
 
 ## What it checks
 
-51 rules across six categories:
+56 rules across six categories:
 
 | Prefix | Covers |
 | --- | --- |
@@ -262,6 +262,7 @@ run at all below full coverage.
 | `HK` | Hook conditions that fire when there is nothing to report, imperative injected context, rules re-injected at context boundaries |
 | `WF` | Orphan workflows, dead references, routing to things that do not exist, cross-runtime asymmetry, command/skill name collisions |
 | `CB` | Avoidable preloaded metadata, unused plugins, skills you have never invoked, plugins your config names but never uses, duplicate installs, stray files |
+| `AG` | Subagents that never load, missing or invalid `name`/`description`, duplicate names, descriptions that never say when to delegate |
 | `MR` | Managed-mirror drift, generated-file drift, unreadable governance declarations, paths the scan could not read |
 
 `python3 -m studio.cli health --json` emits every finding with machine-readable
@@ -431,7 +432,7 @@ studio/
 web/            dashboard; hand-rolled force-directed graph, no CDN
 canonical/      your instruction sources + governance declarations
 examples/       worked remediation scripts built on studio.patch
-tests/          297 tests (254 Python + 43 dashboard), standard library unittest
+tests/          310 tests (267 Python + 43 dashboard), standard library unittest
 ```
 
 ## Writing your own checks
@@ -471,7 +472,7 @@ is well-formed, reachable, non-duplicated and affordable.
 python3 -m unittest discover -s tests -t .
 ```
 
-297 tests (254 Python + 43 dashboard). Four groups are worth singling out.
+310 tests (267 Python + 43 dashboard). Four groups are worth singling out.
 
 The hook tests run real shell commands against throwaway git repositories,
 because the defect they exist to prevent is a condition that fires when there is

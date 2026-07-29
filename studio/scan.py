@@ -32,7 +32,11 @@ CODEX_DIR = os.path.join(HOME, ".codex")
 AGENT_LIB_DIR = os.path.join(HOME, ".agent")
 
 #: Absolute or ~-anchored paths mentioned in instruction/skill prose.
-_PATH_RE = re.compile(r"(?:~/|/Users/[A-Za-z0-9_.\-]+/)[\w./~\-]+\.(?:md|json|py|html|sh|toml|plist)")
+#: An absolute or home-relative path to a file a skill points at. The
+#: extension must end at a word boundary: without `\b`, `skill-usage.jsonl`
+#: matched as `skill-usage.json`, inventing a path that does not exist and
+#: reporting it as a broken reference.
+_PATH_RE = re.compile(r"(?:~/|/Users/[A-Za-z0-9_.\-]+/)[\w./~\-]+\.(?:md|jsonl|json|py|html|sh|toml|plist)\b")
 #: Markdown link targets that stay inside the skill directory.
 _MDLINK_RE = re.compile(r"\[[^\]]*\]\(([^)#\s]+\.md)\)")
 #: Slash-command / skill invocations, e.g. `/qa`, `superpowers:brainstorming`.
@@ -105,8 +109,27 @@ def _purpose(text: str, limit: int = 400) -> str:
     return heading[:limit]
 
 
+def _strip_fences(text: str) -> str:
+    """Blank out fenced code blocks.
+
+    A path inside a shell snippet is a redirect target or an argument, not a
+    file the skill points the reader at. Counting them as references produced
+    phantom broken links - `>> ~/.gstack/analytics/skill-usage.jsonl` is a file
+    the script creates on demand, and it was being reported as missing.
+    """
+    out, fenced = [], False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            out.append("")
+            continue
+        out.append("" if fenced else line)
+    return "\n".join(out)
+
+
 def _refs(text: str, base_dir: str | None = None) -> list[str]:
     """Extract referenced file paths, expanding ``~`` and relative md links."""
+    text = _strip_fences(text)
     out: list[str] = []
     for m in _PATH_RE.findall(text):
         out.append(m.replace("~/", HOME + "/", 1) if m.startswith("~/") else m)
@@ -460,6 +483,8 @@ def _scan_md_dir(root: str, runtime: Runtime, kind: str, errors: list[str]):
                         **base,
                         name=(parsed.text("name") or name).strip(),
                         description=(parsed.text("description") or "").strip(),
+                        frontmatter_present=parsed.present,
+                        declared_name=(parsed.text("name") or "").strip(),
                     )
                 )
     return out

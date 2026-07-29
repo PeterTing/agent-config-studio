@@ -24,9 +24,18 @@ from . import (
 
 _NAME_RE = re.compile(r"^[a-z0-9-]+$")
 #: Signals that a description says *when* to use the skill, not just what it is.
+#: Signals that a description says *when* to use the skill, not just what it is.
+#: Deliberately generous about phrasing. A narrow pattern reported real triggers
+#: as missing - "Use agent-browser ONLY when...", "Trigger whenever...", "Use for
+#: every TEST task" - and a check that flags correct descriptions gets ignored.
 _WHEN_RE = re.compile(
-    r"(use when|use this when|when the user|when you|when working|when asked|triggers?\s+(on|include)"
-    r"|使用時機|何時使用|在.{0,30}(時|前|後)使用|當.{0,40}(時|使用)|適用於)",
+    r"(\buse\b[^.;]{0,60}\bwhen\b"
+    r"|\bwhen\s+(the user|you|a |an |the task|working|asked|invoked|running|there)"
+    r"|\btrigger(s|ed|ing)?\b[^.;]{0,30}\b(when|whenever|on|if|include)"
+    r"|\buse\s+(for|before|after|during|whenever|any time)\b"
+    r"|\bfor (any|every|all)\b"
+    r"|\b(pre-commit|pre-pr|before claiming|before every|after every)\b"
+    r"|使用時機|何時使用|在.{0,30}(時|前|後)使用|當.{0,40}(時|使用)|適用於|用於|需要.{0,20}時)",
     re.I,
 )
 _FIRST_PERSON_RE = re.compile(r"^\s*(i |i'|we |my |you can use|you should use|this lets you)", re.I)
@@ -182,10 +191,11 @@ def sk005(inv: Inventory, cfg: Config):
             continue  # SK004 already covers this
         if _WHEN_RE.search(s.description):
             continue
-        if len(s.description) >= DESC_MIN_USEFUL_CHARS * 3:
-            # Long descriptions without an explicit trigger phrase still usually
-            # carry enough context; only flag the genuinely thin ones.
-            continue
+        # No length escape hatch. A long description that never says when to use
+        # the skill is not "carrying enough context" - it is a detailed statement
+        # of what the thing is, which is exactly the description that never
+        # fires. Two 350-character descriptions here read as thorough while
+        # naming no trigger at all, and the length rule hid both.
         yield make(
             REG["SK005"],
             f"description is {len(s.description)} chars and carries no trigger phrase "

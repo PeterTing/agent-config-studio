@@ -106,6 +106,12 @@ class AgentDef:
     runtime: Runtime
     lines: int
     description: str = ""
+    #: Whether the file has a closed YAML frontmatter block. Without one there is
+    #: no `name`, and identity comes only from `name` - so the file never loads.
+    frontmatter_present: bool = True
+    #: The name as declared in frontmatter, empty when absent. `name` above falls
+    #: back to the filename for display, which would otherwise hide the problem.
+    declared_name: str = ""
 
 
 @dataclass

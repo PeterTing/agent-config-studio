@@ -31,7 +31,7 @@ python3 -m studio.cli health
 No install step. Python 3.11+, standard library only.
 
 The first run scans `~/.claude` and `~/.codex`, indexes your local history, runs
-51 checks and prints a verdict. It writes a report under `var/reports/` and
+56 checks and prints a verdict. It writes a report under `var/reports/` and
 touches nothing else — scanning and grading never modify your configuration.
 
 Expect the first run to take about a minute: it reads every transcript you have
@@ -263,7 +263,7 @@ and a per-process session token, so a stray page in another tab cannot drive
 them. Without the flag, buttons are disabled and the equivalent command is shown
 instead.
 
-**Heuristic rules cannot act.** 51 rules; some are exact (file sizes, hashes,
+**Heuristic rules cannot act.** 56 rules; some are exact (file sizes, hashes,
 version numbers) and some are judgement-shaped patterns (does this sentence add a
 verification step? do these two sections say the same thing?). The
 judgement-shaped ones are wrong sometimes. None of them has an auto-fix — they

@@ -3595,3 +3595,177 @@ class SyncPreviewNamesItsTargets(unittest.TestCase):
 
         src = inspect.getsource(server.Handler._sync_preview)
         self.assertIn('"targets"', src, "sync-preview does not expose what it covers")
+
+
+class ReferenceExtraction(unittest.TestCase):
+    """What counts as a file a skill points the reader at.
+
+    Both cases here produced phantom broken references on a real config: the
+    scanner invented `skill-usage.json` from `skill-usage.jsonl`, and it treated
+    shell redirect targets as progressive-disclosure links.
+    """
+
+    def test_a_jsonl_extension_is_not_truncated(self):
+        from studio.scan import _PATH_RE
+
+        self.assertEqual(
+            _PATH_RE.findall("~/.gstack/analytics/skill-usage.jsonl"),
+            ["~/.gstack/analytics/skill-usage.jsonl"],
+        )
+
+    def test_a_json_path_still_matches(self):
+        from studio.scan import _PATH_RE
+
+        self.assertEqual(_PATH_RE.findall("~/.claude/settings.json"), ["~/.claude/settings.json"])
+
+    def test_paths_inside_code_fences_are_not_references(self):
+        """`>> ~/x.jsonl` is a file the script creates, not one to go read."""
+        from studio.scan import _refs
+
+        text = (
+            "Read ~/.claude/skills/real/SKILL.md first.\n\n"
+            "```bash\n"
+            "echo hi >> ~/.gstack/analytics/skill-usage.jsonl\n"
+            "cat ~/.claude/skills/other/SKILL.md\n"
+            "```\n"
+        )
+        refs = _refs(text)
+        self.assertIn(os.path.expanduser("~/.claude/skills/real/SKILL.md"), refs)
+        self.assertEqual(
+            [r for r in refs if "gstack" in r or "other" in r],
+            [],
+            "a path inside a code fence was treated as a reference",
+        )
+
+    def test_an_unclosed_fence_does_not_swallow_the_rest(self):
+        from studio.scan import _strip_fences
+
+        out = _strip_fences("before\n```\ninside\n")
+        self.assertIn("before", out)
+        self.assertNotIn("inside", out)
+
+
+class SubagentRules(unittest.TestCase):
+    """Subagents were the one configured thing no rule looked at. The setup this
+    was written against had eleven definition files, 3,500 lines, none of which
+    Claude Code could load - and the report was green."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _agent(self, body, name="a.md", runtime=None):
+        from studio.model import AgentDef
+        from studio import fm
+
+        path = os.path.join(self._tmp.name, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        parsed = fm.parse(body)
+        return AgentDef(
+            id=f"agent:{name}",
+            name=(parsed.text("name") or name[:-3]).strip(),
+            path=path,
+            runtime=runtime or Runtime.CLAUDE,
+            lines=len(body.splitlines()),
+            description=(parsed.text("description") or "").strip(),
+            frontmatter_present=parsed.present,
+            declared_name=(parsed.text("name") or "").strip(),
+        )
+
+    def _inv(self, *agents):
+        inv = Inventory()
+        inv.agents = list(agents)
+        return inv
+
+    def _run(self, fn, *agents):
+        return list(fn(self._inv(*agents), Config(repo_root=".")))
+
+    def test_no_frontmatter_is_critical(self):
+        """Identity comes only from `name`, so a file without frontmatter has no
+        identity and can never be delegated to."""
+        from studio.rules.agents import ag001
+
+        out = self._run(ag001, self._agent("# Python Expert\n\nSome guidance.\n"))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].severity, Severity.CRITICAL)
+
+    def test_a_well_formed_agent_is_not_reported(self):
+        from studio.rules.agents import ag001, ag002, ag003, ag005
+
+        a = self._agent(
+            "---\nname: code-reviewer\ndescription: Reviews code. Use after writing or "
+            "modifying code.\n---\n\nBody.\n"
+        )
+        for fn in (ag001, ag002, ag003, ag005):
+            self.assertEqual(self._run(fn, a), [], f"{fn.__name__} reported a valid agent")
+
+    def test_a_subdirectory_is_not_itself_a_problem(self):
+        """The docs say both agent directories are scanned recursively and the
+        subfolder does not affect identity, so nesting must not be reported."""
+        from studio.rules.agents import ag001, ag002, ag003, ag005
+
+        a = self._agent(
+            "---\nname: nested-one\ndescription: Does a thing. Use when asked.\n---\n\nBody.\n",
+            name="deep.md",
+        )
+        a.path = os.path.join(self._tmp.name, "reviewers", "deep.md")
+        for fn in (ag001, ag002, ag003, ag005):
+            self.assertEqual(self._run(fn, a), [])
+
+    def test_missing_required_fields_are_reported(self):
+        from studio.rules.agents import ag002
+
+        out = self._run(ag002, self._agent("---\nname: only-name\n---\n\nBody.\n"))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].evidence["missing"], ["description"])
+
+    def test_a_colon_in_the_name_is_critical(self):
+        """The docs state Claude Code does not load such a file at all."""
+        from studio.rules.agents import ag003
+
+        out = self._run(
+            ag003,
+            self._agent("---\nname: my:agent\ndescription: Use when asked.\n---\n\nB.\n"),
+        )
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].evidence["reason"], "colon")
+
+    def test_an_uppercase_name_is_reported(self):
+        from studio.rules.agents import ag003
+
+        out = self._run(
+            ag003,
+            self._agent("---\nname: MyAgent\ndescription: Use when asked.\n---\n\nB.\n"),
+        )
+        self.assertEqual(out[0].evidence["reason"], "format")
+
+    def test_duplicate_names_are_reported_once(self):
+        from studio.rules.agents import ag004
+
+        body = "---\nname: twin\ndescription: Use when asked.\n---\n\nB.\n"
+        out = self._run(ag004, self._agent(body, "a.md"), self._agent(body, "b.md"))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out[0].evidence["paths"]), 2)
+
+    def test_a_description_without_a_trigger_is_reported(self):
+        from studio.rules.agents import ag005
+
+        out = self._run(
+            ag005,
+            self._agent("---\nname: py\ndescription: Python backend expertise.\n---\n\nB.\n"),
+        )
+        self.assertEqual(len(out), 1)
+
+    def test_a_description_with_a_trigger_is_not(self):
+        from studio.rules.agents import ag005
+
+        for desc in (
+            "Reviews code. Use after writing or modifying code.",
+            "Use when the user asks about deployment.",
+            "Handles migrations. 使用時機：需要改資料庫結構時。",
+        ):
+            a = self._agent(f"---\nname: x\ndescription: {desc}\n---\n\nB.\n")
+            self.assertEqual(self._run(ag005, a), [], f"flagged a valid trigger: {desc!r}")

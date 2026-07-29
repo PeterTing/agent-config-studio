@@ -24,6 +24,7 @@ SPEC_OPUS5 = "https://platform.claude.com/docs/en/build-with-claude/prompt-engin
 SPEC_CTX5 = "https://claude.com/blog/the-new-rules-of-context-engineering-for-claude-5-generation-models"
 SPEC_MEMORY = "https://code.claude.com/docs/en/memory"
 SPEC_HOOKS = "https://code.claude.com/docs/en/hooks"
+SPEC_AGENTS = "https://code.claude.com/docs/en/sub-agents"
 
 # --------------------------------------------------------------------------- #
 # Thresholds, each traceable to a published number
@@ -239,7 +240,7 @@ def ensure_loaded() -> None:
     Imports live in a function rather than at module scope because each rule
     module imports names from this one.
     """
-    from . import context, hooks, instructions, mirrors, skills, workflows  # noqa: F401
+    from . import agents, context, hooks, instructions, mirrors, skills, workflows  # noqa: F401
 
 
 def run_all(inv: Inventory, cfg: Config) -> list[Finding]:
