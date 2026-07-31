@@ -732,9 +732,15 @@ class Handler(SimpleHTTPRequestHandler):
         except (OSError, subprocess.TimeoutExpired) as exc:
             return {"available": False, "reason": str(exc)}
         out = p.stdout or ""
+        # Drift gets its own field rather than living inside the status blob.
+        # The scheduled job runs from a copy of the package, so after any edit
+        # here it keeps checking with old code - it reported five blocking
+        # findings for two days after they were fixed - and the only warning was
+        # a line inside a collapsed section nobody opens.
         return {
             "available": True,
             "installed": "not loaded" not in out.lower() and p.returncode == 0,
+            "drifted": "DRIFTED" in out,
             "output": out.strip()[:2000],
             "install_command": "scripts/install-launchd.sh install",
         }

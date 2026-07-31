@@ -430,6 +430,22 @@ test('an installed schedule can be inspected', () => {
   assert.ok(html.includes('loaded: yes'));
 });
 
+test('a drifted scheduled copy is called out, not buried', () => {
+  // The scheduled job runs from a copy. After an edit it keeps checking with old
+  // code - it reported five fixed findings for two days - and the only warning
+  // was a line inside a collapsed section.
+  const html = scheduleHtml({ available: true, installed: true, drifted: true, output: 'copy: DRIFTED', install_command: 'scripts/install-launchd.sh install' });
+  assert.ok(html.includes('舊版程式碼'), 'drift is not stated');
+  assert.ok(html.includes('result bad'), 'drift is not visually flagged');
+  assert.ok(html.includes('install-launchd.sh install'), 'does not say how to fix it');
+});
+
+test('an in-sync schedule says so explicitly', () => {
+  const html = scheduleHtml({ available: true, installed: true, drifted: false, output: 'copy: in sync' });
+  assert.ok(html.includes('與 repo 同步'));
+  assert.ok(html.includes('result ok'));
+});
+
 test('no installer available says so rather than claiming not installed', () => {
   assert.ok(scheduleHtml({ available: false, reason: 'installer not present' }).includes('沒有排程安裝程式'));
 });

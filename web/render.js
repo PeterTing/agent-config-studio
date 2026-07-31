@@ -389,7 +389,16 @@ function scheduleHtml(s) {
         <div class="sub">在 repo 根目錄執行：<code class="mono">${escapeHtml(s.install_command)}</code></div>
       </div>`;
   }
-  return `<div class="result ok"><b>✓ 每日排程已安裝</b>
+  if (s.drifted) {
+    return `<div class="result bad">
+        <b>⚠ 排程用的是舊版程式碼</b>
+        <div>排程從套件的<b>副本</b>執行。你改過 <code class="mono">studio/</code> 之後沒重新安裝，
+        所以每天自動跑的還是舊規則 —— 它可能回報早就修好的問題，或漏掉新加的檢查。</div>
+        <div class="sub">修正：在 repo 根目錄跑 <code class="mono">${escapeHtml(s.install_command)}</code></div>
+        <details><summary>看狀態輸出</summary><pre class="steps">${escapeHtml(s.output || '')}</pre></details>
+      </div>`;
+  }
+  return `<div class="result ok"><b>✓ 每日排程已安裝，且與 repo 同步</b>
       <details><summary>看狀態輸出</summary><pre class="steps">${escapeHtml(s.output || '')}</pre></details>
     </div>`;
 }
