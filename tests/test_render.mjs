@@ -75,6 +75,18 @@ const METRICS = {
   },
 };
 
+test('cost is shown per runtime, never as a sum nobody pays', () => {
+  // Plugins and toolkits install under ~/.claude, so Codex cannot load them.
+  // A single combined figure is a number no session ever pays.
+  const html = metaBreakdownHtml({
+    ...METRICS,
+    per_runtime: { claude: { est_tokens: 10664, skills: 174 }, codex: { est_tokens: 4896, skills: 62 } },
+  }, 1097);
+  assert.ok(html.includes('10,664'), 'Claude cost not shown');
+  assert.ok(html.includes('4,896'), 'Codex cost not shown');
+  assert.ok(html.includes('沒有任何一次對話會付'), 'did not warn that the total is not a session cost');
+});
+
 test('the skill count beside the token figure is what the figure counts', () => {
   // The bug: this showed the inventory total (1,098), which includes an
   // unreferenced library that is never loaded and costs nothing. The number

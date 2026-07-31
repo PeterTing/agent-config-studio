@@ -3991,3 +3991,47 @@ class ToolkitOwnsItsRootSkill(unittest.TestCase):
             fh.write("---\nname: my-own\ndescription: Mine. Use when asked.\n---\n")
 
         self.assertNotIn(path, managed_paths([self._toolkit()]))
+
+
+class PreloadCostIsPerRuntime(unittest.TestCase):
+    """A single combined figure is a number no session ever pays. Plugins and
+    toolkits install under ~/.claude, so Codex cannot load them; each runtime
+    preloads only what it can load."""
+
+    def _metrics(self):
+        from studio.health import _metrics
+        from studio.model import Plugin, Runtime
+
+        inv = Inventory()
+        inv.skills = [
+            Skill(id="a", name="mine-c", dir_name="mine-c", path="/h/.claude/skills/a/SKILL.md",
+                  runtime=Runtime.CLAUDE, origin=Origin.LOCAL, description="x" * 100),
+            Skill(id="b", name="mine-x", dir_name="mine-x", path="/h/.codex/skills/b/SKILL.md",
+                  runtime=Runtime.CODEX, origin=Origin.LOCAL, description="y" * 200),
+            Skill(id="c", name="from-plugin", dir_name="from-plugin", path="/h/.claude/plugins/c/SKILL.md",
+                  runtime=Runtime.CLAUDE, origin=Origin.PLUGIN, description="z" * 400, plugin="p"),
+        ]
+        return _metrics(inv, Config(repo_root="."))["preloaded_skill_metadata"]
+
+    def test_each_runtime_gets_its_own_total(self):
+        pr = self._metrics()["per_runtime"]
+        self.assertIn("claude", pr)
+        self.assertIn("codex", pr)
+        self.assertGreater(pr["claude"]["est_tokens"], 0)
+        self.assertGreater(pr["codex"]["est_tokens"], 0)
+
+    def test_plugin_skills_count_only_against_claude(self):
+        """They install under ~/.claude. Charging Codex for them overstates what
+        a Codex session actually loads."""
+        pr = self._metrics()["per_runtime"]
+        self.assertEqual(pr["codex"]["skills"], 1, "Codex was charged for a plugin skill")
+        self.assertEqual(pr["claude"]["skills"], 2)
+
+    def test_the_runtimes_sum_to_the_old_total(self):
+        """The combined figure still exists for continuity, but it is the sum of
+        two runtimes and must never be presented as one session's cost."""
+        m = self._metrics()
+        pr = m["per_runtime"]
+        self.assertEqual(
+            pr["claude"]["bytes"] + pr["codex"]["bytes"], m["total_bytes"]
+        )

@@ -45,8 +45,11 @@ function metaBreakdownHtml(metrics, inventorySkillCount) {
     <p class="sub" style="margin:0 0 10px">
       每個 skill 的 <b>名稱</b>和<b>描述</b>（不是內文）會在每次對話開始時全部載入，
       agent 才知道有哪些 skill 可用、什麼時候該用。內文只有在真的呼叫該 skill 時才讀。
-      所以這 <b>${num(metrics.total_est_tokens)} tokens ＝ ${num(counted)} 個「真的會被載入」的 skill
-      名稱＋描述總和</b>，不是它們的完整內容。${
+      <b>每個 runtime 只載入自己讀得到的</b>：Claude ${num(((metrics.per_runtime||{}).claude||{}).est_tokens)} tokens、
+      Codex ${num(((metrics.per_runtime||{}).codex||{}).est_tokens)} tokens。
+      plugin 與工具組都裝在 <code class="mono">~/.claude</code>，Codex 讀不到，
+      所以<b>沒有任何一次對話會付兩者相加的 ${num(metrics.total_est_tokens)}</b>。
+      下表是 ${num(counted)} 個會被載入的 skill 依來源拆開。${
         notLoaded
           ? `（你機器上另外還有 ${num(notLoaded)} 個 skill 在 agent 讀不到的目錄裡，那些完全不花錢，也沒算進來。）`
           : ''

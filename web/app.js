@@ -207,10 +207,23 @@ function renderOverview() {
   renderStatus();
 
   $('m-blocking').textContent = num(counts.blocking ?? 0);
-  $('m-meta').innerHTML = `${num(meta.total_est_tokens)}<small> tokens</small>`;
-  $('m-meta-sub').textContent = meta.avoidable_est_tokens
-    ? `其中 ${num(meta.avoidable_est_tokens)} tokens 來自沒在用、也沒被你的設定引用的 plugin`
-    : '沒有可避免的浪費';
+  // Per runtime, never summed: each one preloads only what it can load, so a
+  // combined figure is a number no session ever pays.
+  const pr = meta.per_runtime || {};
+  const c = (pr.claude || {}).est_tokens;
+  const x = (pr.codex || {}).est_tokens;
+  $('m-meta').innerHTML =
+    c === undefined
+      ? `${num(meta.total_est_tokens)}<small> tokens</small>`
+      : `${num(c)}<small> / </small>${num(x)}<small> tokens</small>`;
+  $('m-meta-sub').innerHTML =
+    (c === undefined
+      ? ''
+      : `Claude ${num(c)}（${(pr.claude || {}).skills} 個 skill）、Codex ${num(x)}（${(pr.codex || {}).skills} 個）。` +
+        'plugin 與工具組都裝在 ~/.claude，Codex 讀不到。<br>') +
+    (meta.avoidable_est_tokens
+      ? `其中 ${num(meta.avoidable_est_tokens)} tokens 來自沒在用、也沒被你的設定引用的 plugin`
+      : '沒有可避免的浪費');
 
   const instr = (h.metrics || {}).instruction_files || s.instruction_files || [];
   $('m-instr').textContent = instr.length ? instr.map((i) => i.lines).join(' / ') : '–';

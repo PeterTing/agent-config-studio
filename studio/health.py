@@ -93,6 +93,13 @@ def _metrics(inv: Inventory, cfg: Config) -> dict:
 
     by_bucket: dict[str, dict] = {}
     total = 0
+    # Each runtime preloads only what it can load, so a single combined figure is
+    # a number no session ever pays. Plugins and toolkits install under
+    # ~/.claude, so they are Claude's cost alone.
+    per_runtime: dict[str, dict] = {
+        "claude": {"skills": 0, "bytes": 0},
+        "codex": {"skills": 0, "bytes": 0},
+    }
     for s in inv.skills:
         if s.origin is Origin.ORPHAN_LIBRARY:
             continue
@@ -102,6 +109,13 @@ def _metrics(inv: Inventory, cfg: Config) -> dict:
         b = by_bucket.setdefault(key, {"skills": 0, "bytes": 0})
         b["skills"] += 1
         b["bytes"] += n
+
+        loads_in = "claude" if s.origin is not Origin.LOCAL else s.runtime.value
+        if loads_in in per_runtime:
+            per_runtime[loads_in]["skills"] += 1
+            per_runtime[loads_in]["bytes"] += n
+    for r in per_runtime.values():
+        r["est_tokens"] = r["bytes"] // BYTES_PER_TOKEN
 
     # Use the same classifier the rule grades on, so the reported number and the
     # verdict can never disagree.
@@ -125,6 +139,7 @@ def _metrics(inv: Inventory, cfg: Config) -> dict:
 
     return {
         "preloaded_skill_metadata": {
+            "per_runtime": per_runtime,
             "total_bytes": total,
             "total_est_tokens": total // BYTES_PER_TOKEN,
             "avoidable_bytes": avoidable,
