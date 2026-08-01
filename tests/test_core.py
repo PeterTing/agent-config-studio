@@ -5279,3 +5279,528 @@ class WritingNeverFollowsADanglingSymlink(unittest.TestCase):
         patch_mod.apply(cs, self.repo)
         self.assertTrue(os.path.islink(link), "the symlink was replaced by a regular file")
         self.assertEqual(open(real, encoding="utf-8").read(), "new\n")
+
+
+class EveryRuleIsProvenToFire(unittest.TestCase):
+    """One violating case and one clean case per rule.
+
+    A rule is a claim about the guidance, and until something makes it fire the
+    claim is untested - 23 of the 56 produced no finding anywhere in this suite,
+    which means nothing distinguished "correctly silent" from "silently broken".
+    Each test here pairs the two: the rule must fire on the shape it exists to
+    catch, and stay quiet on the same shape made correct. A rule that always
+    fired would pass the first assertion and fail the second.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        # Every fixture gets its own directory. Sharing one made the second call
+        # in a test overwrite the first, so the violating file no longer existed
+        # by the time the rule read it - and the rule "correctly" found nothing.
+        self._seq = 0
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _slot(self) -> str:
+        self._seq += 1
+        return f"case{self._seq}"
+
+    # -- builders ---------------------------------------------------------- #
+
+    def _skill(self, body, *, dir_name="thing", origin=Origin.LOCAL, runtime=Runtime.CLAUDE):
+        d = os.path.join(self.tmp, self._slot(), "skills", dir_name)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "SKILL.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        parsed = fm.parse(body)
+        return Skill(
+            id=f"skill:{dir_name}",
+            name=(parsed.text("name") or "").strip(),
+            dir_name=dir_name,
+            path=path,
+            runtime=runtime,
+            origin=origin,
+            description=(parsed.text("description") or "").strip(),
+            body_lines=len(parsed.body.splitlines()),
+            frontmatter_present=parsed.present,
+            parse_warnings=list(parsed.warnings),
+        )
+
+    def _instruction(self, text, *, name="CLAUDE.md", runtime=Runtime.CLAUDE, refs=()):
+        d = os.path.join(self.tmp, self._slot())
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return Instruction(
+            id=f"ins:{name}",
+            path=path,
+            runtime=runtime,
+            lines=len(text.splitlines()),
+            bytes=len(text.encode("utf-8")),
+            refs=list(refs),
+        )
+
+    def _workflow(self, text, *, name="build.md", runtime=Runtime.CLAUDE, refs=()):
+        d = os.path.join(self.tmp, self._slot(), "workflows", runtime.value)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        from studio.model import Workflow
+
+        return Workflow(
+            id=f"wf:{runtime.value}:{name}",
+            path=path,
+            runtime=runtime,
+            lines=len(text.splitlines()),
+            refs=list(refs),
+        )
+
+    def _hook(self, event, injects, *, if_rule=""):
+        from studio.model import Hook
+
+        return Hook(
+            id=f"hook:{event}",
+            event=event,
+            matcher="*",
+            index=0,
+            type="command",
+            source=os.path.join(self.tmp, "settings.json"),
+            injects=injects,
+            if_rule=if_rule,
+        )
+
+    def _plugin(self, key, marketplace, *, enabled=True):
+        from studio.model import Plugin
+
+        return Plugin(
+            id=f"plugin:claude:{key}",
+            key=key,
+            marketplace=marketplace,
+            runtime=Runtime.CLAUDE,
+            enabled=enabled,
+        )
+
+    def _run(self, fn, inv, **cfg_kwargs):
+        inv.roots = inv.roots or {"claude": self.tmp}
+        cfg = Config(repo_root=self.tmp)
+        for k, v in cfg_kwargs.items():
+            setattr(cfg, k, v)
+        return list(fn(inv, cfg))
+
+    def _inv(self, **kw):
+        inv = Inventory()
+        for k, v in kw.items():
+            setattr(inv, k, v)
+        return inv
+
+    # -- skills ------------------------------------------------------------ #
+
+    def test_sk001_fires_without_frontmatter(self):
+        from studio.rules.skills import sk001
+
+        bad = self._skill("Just a body, no frontmatter.\n")
+        good = self._skill("---\nname: thing\ndescription: Does X. Use when Y.\n---\nbody\n")
+        self.assertEqual(len(self._run(sk001, self._inv(skills=[bad]))), 1)
+        self.assertEqual(self._run(sk001, self._inv(skills=[good])), [])
+
+    def test_sk002_fires_on_an_illegal_name(self):
+        from studio.rules.skills import sk002
+
+        bad = self._skill("---\nname: My Skill!\ndescription: Does X. Use when Y.\n---\nb\n")
+        good = self._skill("---\nname: my-skill\ndescription: Does X. Use when Y.\n---\nb\n")
+        self.assertEqual(len(self._run(sk002, self._inv(skills=[bad]))), 1)
+        self.assertEqual(self._run(sk002, self._inv(skills=[good])), [])
+
+    def test_sk003_fires_when_name_and_directory_disagree(self):
+        """Two directories declaring one name means only one ever loads."""
+        from studio.rules.skills import sk003
+
+        bad = self._skill(
+            "---\nname: other-name\ndescription: Does X. Use when Y.\n---\nb\n", dir_name="thing"
+        )
+        good = self._skill(
+            "---\nname: thing\ndescription: Does X. Use when Y.\n---\nb\n", dir_name="thing"
+        )
+        self.assertEqual(len(self._run(sk003, self._inv(skills=[bad]))), 1)
+        self.assertEqual(self._run(sk003, self._inv(skills=[good])), [])
+
+    def test_sk004_fires_on_an_empty_and_on_an_oversized_description(self):
+        from studio.rules.skills import DESC_MAX_CHARS, sk004
+
+        empty = self._skill("---\nname: thing\ndescription: \n---\nb\n")
+        huge = self._skill(
+            f"---\nname: thing\ndescription: {'x' * (DESC_MAX_CHARS + 1)}\n---\nb\n"
+        )
+        good = self._skill("---\nname: thing\ndescription: Does X. Use when Y.\n---\nb\n")
+        self.assertEqual(len(self._run(sk004, self._inv(skills=[empty]))), 1)
+        self.assertEqual(len(self._run(sk004, self._inv(skills=[huge]))), 1)
+        self.assertEqual(self._run(sk004, self._inv(skills=[good])), [])
+
+    def test_sk006_fires_on_a_first_person_description(self):
+        from studio.rules.skills import sk006
+
+        bad = self._skill("---\nname: thing\ndescription: I help you write tests.\n---\nb\n")
+        good = self._skill("---\nname: thing\ndescription: Writes tests. Use when adding code.\n---\nb\n")
+        self.assertEqual(len(self._run(sk006, self._inv(skills=[bad]))), 1)
+        self.assertEqual(self._run(sk006, self._inv(skills=[good])), [])
+
+    def test_sk010_fires_on_a_backslash_path_in_prose(self):
+        from studio.rules.skills import sk010
+
+        bad = self._skill(
+            "---\nname: thing\ndescription: Does X. Use when Y.\n---\nOpen C:\\Users\\me\\notes.txt\n"
+        )
+        good = self._skill(
+            "---\nname: thing\ndescription: Does X. Use when Y.\n---\nOpen ~/notes.txt\n"
+        )
+        self.assertEqual(len(self._run(sk010, self._inv(skills=[bad]))), 1)
+        self.assertEqual(self._run(sk010, self._inv(skills=[good])), [])
+
+    def test_sk010_ignores_a_backslash_inside_a_code_fence(self):
+        """Shell line-continuations legitimately use backslashes."""
+        from studio.rules.skills import sk010
+
+        s = self._skill(
+            "---\nname: thing\ndescription: Does X. Use when Y.\n---\n"
+            "```sh\necho a \\\n  b\n```\n"
+        )
+        self.assertEqual(self._run(sk010, self._inv(skills=[s])), [])
+
+    def test_sk014_fires_on_frontmatter_that_did_not_parse(self):
+        from studio.rules.skills import sk014
+
+        # Opened and never closed: the parser keeps linting the file as body and
+        # records why, which is the warning SK014 surfaces.
+        bad = self._skill("---\nname: thing\ndescription: Does X. Use when Y.\n")
+        self.assertTrue(bad.parse_warnings, "fixture did not actually produce a parse warning")
+        good = self._skill("---\nname: thing\ndescription: Does X. Use when Y.\n---\nb\n")
+        self.assertTrue(self._run(sk014, self._inv(skills=[bad])))
+        self.assertEqual(self._run(sk014, self._inv(skills=[good])), [])
+
+    def test_sk015_fires_when_the_body_contradicts_the_frontmatter(self):
+        """The agent gets opposite instructions from one file."""
+        from studio.rules.skills import sk015
+
+        bad = self._skill(
+            "---\nname: agent-browser\ndescription: Fallback browser. Use when the built-in fails.\n---\n"
+            "agent-browser is the default browser for all tasks.\n",
+            dir_name="agent-browser",
+        )
+        good = self._skill(
+            "---\nname: agent-browser\ndescription: Fallback browser. Use when the built-in fails.\n---\n"
+            "Use it only after the built-in browser fails.\n",
+            dir_name="agent-browser",
+        )
+        self.assertEqual(len(self._run(sk015, self._inv(skills=[bad]))), 1)
+        self.assertEqual(self._run(sk015, self._inv(skills=[good])), [])
+
+    # -- instructions ------------------------------------------------------ #
+
+    def test_in001_fires_over_the_line_target(self):
+        from studio.rules.instructions import INSTRUCTION_MAX_LINES, in001
+
+        bad = self._instruction("line\n" * (INSTRUCTION_MAX_LINES + 1))
+        good = self._instruction("line\n" * 10)
+        self.assertEqual(len(self._run(in001, self._inv(instructions=[bad]))), 1)
+        self.assertEqual(self._run(in001, self._inv(instructions=[good])), [])
+
+    def test_in006_fires_on_a_reference_to_a_missing_file(self):
+        from studio.rules.instructions import in006
+
+        missing = os.path.join(self.tmp, "gone.md")
+        present = os.path.join(self.tmp, "here.md")
+        with open(present, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        bad = self._instruction(f"See {missing} for details.\n", refs=[missing])
+        good = self._instruction(f"See {present} for details.\n", refs=[present])
+        self.assertEqual(len(self._run(in006, self._inv(instructions=[bad]))), 1)
+        self.assertEqual(self._run(in006, self._inv(instructions=[good])), [])
+
+    def test_in005_fires_when_an_instruction_copies_a_skills_rules(self):
+        """The skill is the source of truth and loads on demand. Copying its
+        rules into an always-loaded file pays for them every session and lets
+        the two drift apart."""
+        from studio.rules.instructions import in005
+
+        shared = "\n".join(
+            [
+                "- Always write a failing test before the implementation.",
+                "- Never commit with the linter reporting warnings.",
+                "- Record the command output as evidence of the run.",
+                "- Stop and report when three hypotheses have failed.",
+            ]
+        )
+        skill = self._skill(
+            f"---\nname: testing\ndescription: Runs tests. Use when verifying.\n---\n{shared}\n",
+            dir_name="testing",
+        )
+        copied = self._instruction(f"# Rules\n\nSee the testing skill.\n\n{shared}\n")
+        clean = self._instruction("# Rules\n\nSee the testing skill for the details.\n")
+        self.assertTrue(self._run(in005, self._inv(skills=[skill], instructions=[copied])))
+        self.assertEqual(self._run(in005, self._inv(skills=[skill], instructions=[clean])), [])
+
+    def test_in008_fires_when_an_instruction_mandates_a_retired_artifact(self):
+        """Two rules disagreeing is the worst failure mode: the model may follow
+        either one."""
+        from studio.rules.instructions import in008
+
+        skill = self._skill(
+            "---\nname: reporting\ndescription: Reports results. Use when finishing.\n---\n"
+            "`REPORT.md` 已淘汰，改用儀表板。\n",
+            dir_name="reporting",
+        )
+        mandating = self._instruction("完成後必須產生 `REPORT.md`。\n")
+        consistent = self._instruction("完成後把結果貼到儀表板。\n")
+        self.assertEqual(len(self._run(in008, self._inv(skills=[skill], instructions=[mandating]))), 1)
+        self.assertEqual(self._run(in008, self._inv(skills=[skill], instructions=[consistent])), [])
+
+    def test_in009_fires_on_rules_duplicated_across_runtimes(self):
+        from studio.rules.instructions import in009
+
+        rule_text = "\n".join(
+            f"- Always run the linter before committing change number {i}." for i in range(12)
+        )
+        a = self._instruction(rule_text, name="CLAUDE.md", runtime=Runtime.CLAUDE)
+        b = self._instruction(rule_text, name="AGENTS.md", runtime=Runtime.CODEX)
+        self.assertTrue(self._run(in009, self._inv(instructions=[a, b])))
+
+    def test_in009_is_silent_when_a_generator_owns_the_duplication(self):
+        """A canonical source rendered into both removes the class of problem, so
+        declaring it must actually exempt it - otherwise the tool reports its own
+        recommended fix as a defect."""
+        from studio.rules.instructions import in009
+
+        rule_text = "\n".join(
+            f"- Always run the linter before committing change number {i}." for i in range(12)
+        )
+        a = self._instruction(rule_text, name="CLAUDE.md", runtime=Runtime.CLAUDE)
+        b = self._instruction(rule_text, name="AGENTS.md", runtime=Runtime.CODEX)
+        self.assertEqual(
+            self._run(
+                in009,
+                self._inv(instructions=[a, b]),
+                generated=[{"target": a.path, "sources": ["canonical/core.md"]}],
+            ),
+            [],
+        )
+
+    # -- mirrors ----------------------------------------------------------- #
+
+    def test_mr001_fires_when_declared_mirrors_differ(self):
+        from studio.rules.mirrors import mr001
+
+        one = os.path.join(self.tmp, "a", "SKILL.md")
+        two = os.path.join(self.tmp, "b", "SKILL.md")
+        for path, text in ((one, "same\n"), (two, "different\n")):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        group = [{"name": "g", "paths": [one, two]}]
+        self.assertEqual(len(self._run(mr001, self._inv(), mirrors=group)), 1)
+
+        with open(two, "w", encoding="utf-8") as fh:
+            fh.write("same\n")
+        self.assertEqual(self._run(mr001, self._inv(), mirrors=group), [])
+
+    def test_mr003_fires_when_a_generated_file_was_hand_edited(self):
+        """The drift the whole canonical/ arrangement exists to catch: someone
+        edits the rendered file, the source no longer describes what is on disk,
+        and the two runtimes start diverging."""
+        from studio.canonical import render_target
+        from studio.rules.mirrors import mr003
+        from studio.rules import Config
+
+        os.makedirs(os.path.join(self.tmp, "canonical"), exist_ok=True)
+        with open(os.path.join(self.tmp, "canonical", "core.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Core\n\nAlways run the linter.\n")
+        target = os.path.join(self.tmp, "CLAUDE.md")
+        spec = {"target": target, "sources": ["canonical/core.md"]}
+        cfg = Config(repo_root=self.tmp)
+        cfg.generated = [spec]
+
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write(render_target(cfg, spec))
+        self.assertEqual(list(mr003(self._inv(), cfg)), [], "a freshly rendered file reported drift")
+
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write("\nHand-added rule that is in no source.\n")
+        found = list(mr003(self._inv(), cfg))
+        self.assertEqual(len(found), 1)
+        self.assertIn("canonical/core.md", str(found[0].evidence))
+
+    def test_mr003_fires_when_the_generated_file_is_absent(self):
+        """Declared but never rendered is drift too - the instruction the config
+        promises simply is not there."""
+        from studio.rules.mirrors import mr003
+        from studio.rules import Config
+
+        cfg = Config(repo_root=self.tmp)
+        cfg.generated = [
+            {"target": os.path.join(self.tmp, "never-rendered.md"), "sources": ["canonical/core.md"]}
+        ]
+        self.assertEqual(len(list(mr003(self._inv(), cfg))), 1)
+
+    def test_mr002_fires_when_a_declared_mirror_is_missing(self):
+        from studio.rules.mirrors import mr002
+
+        present = os.path.join(self.tmp, "a.md")
+        with open(present, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        missing = os.path.join(self.tmp, "gone.md")
+        self.assertEqual(
+            len(self._run(mr002, self._inv(), mirrors=[{"name": "g", "paths": [present, missing]}])),
+            1,
+        )
+        self.assertEqual(
+            self._run(mr002, self._inv(), mirrors=[{"name": "g", "paths": [present]}]), []
+        )
+
+    # -- workflows --------------------------------------------------------- #
+
+    def test_wf001_fires_on_a_workflow_nothing_routes_to(self):
+        from studio.rules.workflows import wf001
+
+        wf = self._workflow("# Build\n")
+        unref = self._instruction("Nothing here points anywhere.\n")
+        ref = self._instruction("For BUILD tasks follow the build workflow.\n")
+        self.assertEqual(len(self._run(wf001, self._inv(workflows=[wf], instructions=[unref]))), 1)
+        self.assertEqual(self._run(wf001, self._inv(workflows=[wf], instructions=[ref])), [])
+
+    def test_wf002_fires_on_a_workflow_reference_to_a_missing_file(self):
+        from studio.rules.workflows import wf002
+
+        missing = os.path.join(self.tmp, "gone.md")
+        wf = self._workflow(f"Read {missing}\n", refs=[missing])
+        self.assertEqual(len(self._run(wf002, self._inv(workflows=[wf]))), 1)
+
+    def test_wf004_fires_when_only_one_runtime_has_the_workflow(self):
+        from studio.rules.workflows import wf004
+
+        only_claude = self._workflow("# Build\n", name="build.md", runtime=Runtime.CLAUDE)
+        also_codex = self._workflow("# Build\n", name="build.md", runtime=Runtime.CODEX)
+        self.assertEqual(len(self._run(wf004, self._inv(workflows=[only_claude]))), 1)
+        self.assertEqual(self._run(wf004, self._inv(workflows=[only_claude, also_codex])), [])
+
+    def test_wf005_fires_when_a_command_and_a_skill_share_a_name(self):
+        from studio.rules.workflows import wf005
+
+        skill = self._skill("---\nname: review\ndescription: Does X. Use when Y.\n---\nb\n", dir_name="review")
+        path = os.path.join(self.tmp, "review.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# Review\n")
+        clash = Command(id="c", name="review", path=path, runtime=Runtime.CLAUDE, lines=1)
+        apart = Command(id="c", name="ship", path=path, runtime=Runtime.CLAUDE, lines=1)
+        self.assertEqual(len(self._run(wf005, self._inv(skills=[skill], commands=[clash]))), 1)
+        self.assertEqual(self._run(wf005, self._inv(skills=[skill], commands=[apart])), [])
+
+    def test_wf005_does_not_pair_across_runtimes(self):
+        """A Claude command and a Codex skill are never loaded together."""
+        from studio.rules.workflows import wf005
+
+        skill = self._skill(
+            "---\nname: review\ndescription: Does X. Use when Y.\n---\nb\n",
+            dir_name="review",
+            runtime=Runtime.CODEX,
+        )
+        path = os.path.join(self.tmp, "review.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("# Review\n")
+        cmd = Command(id="c", name="review", path=path, runtime=Runtime.CLAUDE, lines=1)
+        self.assertEqual(self._run(wf005, self._inv(skills=[skill], commands=[cmd])), [])
+
+    # -- hooks / context --------------------------------------------------- #
+
+    def test_hk002_fires_on_an_imperative_injection(self):
+        from studio.rules.hooks import hk002
+
+        bad = self._hook("PreToolUse", "Reject this operation and run /qa-only first.")
+        good = self._hook("PreToolUse", "No QA run is recorded for this branch.")
+        self.assertEqual(len(self._run(hk002, self._inv(hooks=[bad]))), 1)
+        self.assertEqual(self._run(hk002, self._inv(hooks=[good])), [])
+
+    def test_hk003_fires_when_a_boundary_hook_restates_instructions(self):
+        from studio.rules.hooks import hk003
+
+        text = "提醒：依 CLAUDE.md 的意圖路由表，先宣告意圖再開始，並選用對應的 skill 或 workflow。" * 2
+        bad = self._hook("UserPromptSubmit", text)
+        good = self._hook("UserPromptSubmit", "Branch: main. 3 files changed.")
+        self.assertEqual(len(self._run(hk003, self._inv(hooks=[bad]))), 1)
+        self.assertEqual(self._run(hk003, self._inv(hooks=[good])), [])
+
+    def test_cb006_fires_on_one_plugin_from_two_marketplaces(self):
+        from studio.rules.context import cb006
+
+        two = [self._plugin("p@m1", "m1"), self._plugin("p@m2", "m2")]
+        one = [self._plugin("p@m1", "m1")]
+        self.assertEqual(len(self._run(cb006, self._inv(plugins=two))), 1)
+        self.assertEqual(self._run(cb006, self._inv(plugins=one)), [])
+
+    def test_cb006_ignores_a_disabled_second_install(self):
+        """Only one is loaded, which is the state a fix produces - reporting it
+        would mean the fix never clears the finding."""
+        from studio.rules.context import cb006
+
+        plugins = [self._plugin("p@m1", "m1"), self._plugin("p@m2", "m2", enabled=False)]
+        self.assertEqual(self._run(cb006, self._inv(plugins=plugins)), [])
+
+
+class NoRuleShipsUnproven(unittest.TestCase):
+    """A guard on the guards.
+
+    Twenty-three of the fifty-six rules once produced no finding anywhere in this
+    suite. Each was a claim about the official guidance that nothing checked, and
+    a rule that has never fired is indistinguishable from one that cannot. This
+    test fails when a new rule is added without a case that makes it fire, so the
+    gap cannot silently reopen.
+    """
+
+    def test_every_registered_rule_fires_somewhere_in_this_suite(self):
+        import subprocess
+        import sys
+
+        from studio.rules import REGISTRY, ensure_loaded
+
+        ensure_loaded()
+        expected = sorted(r.code for r in REGISTRY)
+
+        # A subprocess, because the counter has to observe the whole suite - and
+        # this test is part of that suite.
+        probe = (
+            "import collections, json, unittest, sys\n"
+            "from studio.model import Finding\n"
+            "fired = collections.Counter()\n"
+            "_orig = Finding.__init__\n"
+            "def traced(self, *a, **k):\n"
+            "    _orig(self, *a, **k)\n"
+            "    fired[self.rule] += 1\n"
+            "Finding.__init__ = traced\n"
+            "suite = unittest.TestLoader().discover('tests', pattern='test_*.py')\n"
+            "unittest.TextTestRunner(verbosity=0, stream=open(os.devnull,'w')).run(suite)\n"
+            "print(json.dumps(sorted(fired)))\n"
+        )
+        probe = "import os\n" + probe
+        env = dict(os.environ, STUDIO_RULE_COVERAGE_PROBE="1")
+        if os.environ.get("STUDIO_RULE_COVERAGE_PROBE"):
+            self.skipTest("already inside the coverage probe")
+        out = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env=env,
+            timeout=600,
+        )
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        fired = set(json.loads(out.stdout.strip().splitlines()[-1]))
+        missing = [c for c in expected if c not in fired]
+        self.assertEqual(
+            missing,
+            [],
+            "these rules never produce a finding in any test, so nothing verifies "
+            f"they detect what they claim: {missing}",
+        )
