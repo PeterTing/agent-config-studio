@@ -37,8 +37,19 @@ class Change:
             return ""
 
     def is_noop(self) -> bool:
+        """Whether applying this change would leave the tree as it is.
+
+        Creating a file is never a no-op, even with empty content: the file not
+        existing and the file existing empty are different states. Treating them
+        as the same dropped the copy half of a quarantine - the original was
+        still deleted, because *that* half had work to do - so a zero-byte stray
+        file was destroyed by the operation whose whole purpose is not to destroy
+        anything.
+        """
         if self.action == "delete":
             return not os.path.exists(self.path)
+        if self.action == "create" and not os.path.exists(self.path):
+            return False
         return self.old_text() == self.new_text
 
     def diff(self) -> str:
@@ -130,6 +141,11 @@ def save(cs: ChangeSet, repo_root: str) -> tuple[str, str]:
                 "created_at": cs.created_at,
                 "description": cs.description,
                 "changes": [asdict(c) for c in cs.effective()],
+                # Part of the plan, not a detail of how it was built. Leaving it
+                # out meant a saved change set applied its file edits and
+                # silently skipped the directory cleanup, so `studio apply`
+                # produced a different result from the run that wrote it.
+                "remove_dirs": list(cs.remove_dirs),
             },
             fh,
             indent=2,
@@ -146,6 +162,7 @@ def load(payload_path: str) -> ChangeSet:
         created_at=data.get("created_at", ""),
         description=data.get("description", ""),
         changes=[Change(**c) for c in data.get("changes", [])],
+        remove_dirs=list(data.get("remove_dirs", [])),
     )
 
 
@@ -165,6 +182,17 @@ def _write(path: str, text: str) -> None:
       non-executable. The original mode is copied onto the replacement first.
     """
     if os.path.islink(path):
+        # Writing through a link is right for a link that resolves: a toolkit
+        # installs its skills that way, and replacing the link with a regular
+        # file severs whatever manages it. A *dangling* link is different -
+        # there is no file to update, so the write creates one wherever the link
+        # points, which may be anywhere on the disk. Nothing legitimately asks
+        # for that, and a create on a dangling link is how it happens.
+        if not os.path.exists(path):
+            raise OSError(
+                f"{path} is a symlink to a file that does not exist; refusing to "
+                "create its target"
+            )
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         return

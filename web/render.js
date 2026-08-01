@@ -93,14 +93,14 @@ function trendHtml(history) {
 
   const chart = `
     <div class="trend2">
-      <div class="ylab"><span>${max}</span><span>0</span></div>
+      <div class="ylab"><span>${escapeHtml(max)}</span><span>0</span></div>
       <div class="bars">${hist
         .map((p) => {
           const b = (p.counts || {}).blocking || 0;
           const pass = p.verdict === 'PASS';
           const pct = b === 0 ? 0 : Math.max(8, Math.round((b / max) * 100));
           const when = (p.generated_at || '').replace('T', ' ').slice(0, 16);
-          return `<div class="slot" title="${escapeHtml(when)} ／ ${pass ? '通過' : '未通過'}：${b} 項待處理">
+          return `<div class="slot" title="${escapeHtml(when)} ／ ${pass ? '通過' : '未通過'}：${escapeHtml(b)} 項待處理">
               <div class="fill ${pass ? 'pass' : 'fail'}" style="height:${pass ? 0 : pct}%"></div>
             </div>`;
         })
@@ -110,10 +110,28 @@ function trendHtml(history) {
       (last.generated_at || '').slice(0, 10),
     )}（最新）</span></div>`;
 
+  // Says where the failures actually are, rather than asserting they are old.
+  // The caption used to claim "都在早期" unconditionally, and it kept saying it
+  // on a history whose two most recent runs had both failed - which is the one
+  // case where a reader needs to be told something different.
+  const lastFailIdx = hist.map((p) => p.verdict !== 'PASS').lastIndexOf(true);
+  let status;
+  if (!fails) {
+    status = '全部通過';
+  } else if (last.verdict !== 'PASS') {
+    // num() formats and escapes; the value comes from a JSON file on disk, and
+    // "it is our own file" is not a reason to interpolate it raw.
+    const b = num((last.counts || {}).blocking || 0);
+    status = `有 <b>${escapeHtml(fails)}</b> 次未通過，<b>包含最新這次</b>（${escapeHtml(b)} 項待處理）`;
+  } else {
+    const since = hist.length - 1 - lastFailIdx;
+    const when = escapeHtml((hist[lastFailIdx].generated_at || '').slice(0, 10));
+    status = `有 <b>${escapeHtml(fails)}</b> 次未通過，最近一次在 ${when}，之後連續 ${escapeHtml(since)} 次通過`;
+  }
   const caption = `
-    一根 = 一次健檢，左舊右新，共 ${hist.length} 次。<b>柱子越高代表當時待處理的問題越多</b>；
+    一根 = 一次健檢，左舊右新，共 ${escapeHtml(hist.length)} 次。<b>柱子越高代表當時待處理的問題越多</b>；
     貼齊底線的綠色細線代表那次是 0 問題、通過。滑鼠移上去看日期與數量。
-    目前 ${fails > 0 ? `有 <b>${fails}</b> 次未通過（都在早期，是這個工具剛開始幫你清理時的狀態）` : '全部通過'}。`;
+    目前 ${status}。`;
 
   return { chart, caption };
 }
@@ -187,6 +205,32 @@ function howtoHtml(kind) {
     </dl>`;
 }
 
+/* Which actions a catalogue row may honestly offer.
+ *
+ * Quarantine moves a file out of the config tree. That is the right offer for
+ * something you wrote, and the wrong one for vendor content: a plugin upgrade
+ * puts the file straight back, and removing one file out of an install leaves
+ * the plugin half-present. The button was shown on every row regardless, so the
+ * page invited an action that could not stick and said nothing about why.
+ */
+const VENDOR_ORIGINS = { plugin: 'plugin', toolkit: '工具組' };
+
+function rowActionsHtml(r) {
+  const path = escapeHtml(shortPath(r.path));
+  const peek = `<button class="linkish" data-peek="${path}">看內容</button>`;
+  const vendor = VENDOR_ORIGINS[r.origin];
+  if (!vendor) {
+    return `${peek}<button class="linkish danger" data-quarantine="${path}">隔離</button>`;
+  }
+  const how =
+    r.origin === 'plugin'
+      ? r.plugin
+        ? `到「plugin」分頁停用 <code class="mono">${escapeHtml(r.plugin)}</code>`
+        : '到「plugin」分頁停用它所屬的 plugin'
+      : '用該工具組自己的指令移除';
+  return `${peek}<span class="muted">這是${vendor}帶進來的，隔離會被下次升級覆蓋 —— 要移除請${how}</span>`;
+}
+
 function catalogueCard(kind, r) {
   const name = r.name || r.dir_name || shortPath(r.path);
   const src = r.origin ? `<span class="tag">${escapeHtml(r.origin)}</span>` : '';
@@ -210,7 +254,7 @@ function catalogueCard(kind, r) {
           : '<span class="muted">沒有描述 —— 沒有描述就等於不會被自動觸發。</span>'
       }</div>
       <div class="cat-f">
-        <button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button>
+        ${rowActionsHtml(r)}
         ${
           orphan
             ? '<span class="off">✕ 這個載入不到 —— 它不在 agent 會讀的目錄裡，叫了也不會有反應</span>'
@@ -226,7 +270,7 @@ function catalogueCard(kind, r) {
       <div class="cat-h"><b class="mono">/${escapeHtml(name)}</b>${rt}<span class="grow"></span>
         <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
       <div class="cat-d">${escapeHtml(r.description || '（這個 command 沒有描述）')}</div>
-      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button><span>打 <code class="mono">/${escapeHtml(name)}</code> 執行</span>
+      <div class="cat-f">${rowActionsHtml(r)}<span>打 <code class="mono">/${escapeHtml(name)}</code> 執行</span>
         <span class="mono muted">${escapeHtml(shortPath(r.path))}</span></div>
     </article>`;
   }
@@ -235,7 +279,7 @@ function catalogueCard(kind, r) {
       <div class="cat-h"><b class="mono">${escapeHtml(name)}</b><span class="grow"></span>
         <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
       <div class="cat-d">${escapeHtml(r.description || '（沒有描述）')}</div>
-      <div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button><span>要它做事：<code class="mono">用 ${escapeHtml(name)} agent</code></span>
+      <div class="cat-f">${rowActionsHtml(r)}<span>要它做事：<code class="mono">用 ${escapeHtml(name)} agent</code></span>
         <span class="mono muted">${escapeHtml(shortPath(r.path))}</span></div>
     </article>`;
   }
@@ -252,7 +296,7 @@ function catalogueCard(kind, r) {
     <div class="cat-h"><b class="mono">${escapeHtml(shortPath(r.path))}</b>${rt}<span class="grow"></span>
       <span class="muted mono" style="font-size:12px">${r.lines} 行</span></div>
     ${r.description ? `<div class="cat-d">${escapeHtml(r.description)}</div>` : ''}
-    ${kind === 'workflows' ? `<div class="cat-f"><button class="linkish" data-peek="${escapeHtml(shortPath(r.path))}">看內容</button><button class="linkish danger" data-quarantine="${escapeHtml(shortPath(r.path))}">隔離</button><span>要用它：<code class="mono">照 ${escapeHtml(stem)} workflow 做</code></span></div>` : ''}
+    ${kind === 'workflows' ? `<div class="cat-f">${rowActionsHtml(r)}<span>要用它：<code class="mono">照 ${escapeHtml(stem)} workflow 做</code></span></div>` : ''}
   </article>`;
 }
 
@@ -485,6 +529,7 @@ function breakdownRows(counts) {
 
 export {
   breakdownRows,
+  rowActionsHtml,
   num,
   shortPath,
   escapeHtml,

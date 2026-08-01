@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import {
+  rowActionsHtml,
   breakdownRows,
   metaBreakdownHtml,
   trendHtml,
@@ -526,6 +527,96 @@ test('breakdownRows tolerates a report with no counts', () => {
     breakdownRows(undefined).map((r) => r.n),
     [0, 0, 0, 0],
   );
+});
+
+/* ---------------- trend caption ---------------- */
+
+const RUN = (day, verdict, blocking = 0) => ({
+  generated_at: `2026-07-${String(day).padStart(2, '0')}T09:00:00Z`,
+  verdict,
+  counts: { blocking },
+});
+
+test('the caption does not call a current failure historical', () => {
+  // The exact history that exposed it: the two most recent runs had failed and
+  // the caption still read "都在早期".
+  const { caption } = trendHtml([RUN(1, 'PASS'), RUN(2, 'FAIL', 3), RUN(3, 'FAIL', 2)]);
+  assert.ok(!caption.includes('早期'), 'still claims the failures are old');
+  assert.ok(caption.includes('最新'), 'does not say the latest run failed');
+});
+
+test('a current failure reports how much is outstanding', () => {
+  const { caption } = trendHtml([RUN(1, 'PASS'), RUN(2, 'FAIL', 7)]);
+  assert.ok(caption.includes('7'), `outstanding count missing: ${caption}`);
+});
+
+test('an old failure is dated instead of hand-waved', () => {
+  const { caption } = trendHtml([RUN(1, 'FAIL', 4), RUN(2, 'PASS'), RUN(3, 'PASS')]);
+  assert.ok(caption.includes('2026-07-01'), `no date: ${caption}`);
+  assert.ok(caption.includes('2'), 'does not say how many passes followed');
+});
+
+test('an all-clear history says so plainly', () => {
+  const { caption } = trendHtml([RUN(1, 'PASS'), RUN(2, 'PASS')]);
+  assert.ok(caption.includes('全部通過'));
+});
+
+test('an empty history produces no caption to be wrong about', () => {
+  assert.equal(trendHtml([]).caption, '');
+});
+
+/* ---------------- row actions ---------------- */
+
+test('a file you wrote can be quarantined', () => {
+  const html = rowActionsHtml({ path: '/Users/x/.claude/skills/mine/SKILL.md', origin: 'local' });
+  assert.ok(html.includes('data-quarantine'), 'no way to act on your own file');
+});
+
+test('a plugin skill is not offered quarantine', () => {
+  // The upgrade puts it straight back, and removing one file leaves the plugin
+  // half-installed. The button was shown anyway, on every row.
+  const html = rowActionsHtml({
+    path: '/Users/x/.claude/plugins/cache/m/p/1.0.0/skills/s/SKILL.md',
+    origin: 'plugin',
+    plugin: 'p@m',
+  });
+  assert.ok(!html.includes('data-quarantine'), 'still offers an action that cannot stick');
+});
+
+test('a plugin skill is told what to do instead', () => {
+  const html = rowActionsHtml({ path: '/p/SKILL.md', origin: 'plugin', plugin: 'p@m' });
+  assert.ok(html.includes('p@m'), `does not name the plugin to disable: ${html}`);
+});
+
+test('a toolkit skill is refused for its own reason', () => {
+  // It sits in a local-looking path but is overwritten on toolkit upgrade.
+  const html = rowActionsHtml({ path: '/Users/x/.claude/skills/gstack/SKILL.md', origin: 'toolkit' });
+  assert.ok(!html.includes('data-quarantine'));
+  assert.ok(html.includes('工具組'));
+});
+
+test('every row can still be read', () => {
+  for (const origin of ['local', 'plugin', 'toolkit', 'orphan-library', undefined]) {
+    assert.ok(rowActionsHtml({ path: '/p/x.md', origin }).includes('data-peek'), origin);
+  }
+});
+
+test('the trend caption escapes numbers it did not compute', () => {
+  // The counts come from a JSON file on disk. "It is our own file" is not a
+  // reason to interpolate it raw: this caption is written into innerHTML, and
+  // the payload below executed.
+  const { caption } = trendHtml([
+    { generated_at: '2026-08-01', verdict: 'FAIL', counts: { blocking: '<img src=x onerror=alert(1)>' } },
+  ]);
+  assert.ok(!caption.includes('<img'), `markup survived in caption: ${caption}`);
+});
+
+test('the trend chart escapes counts it did not compute', () => {
+  // Same value, interpolated into a title attribute where a quote breaks out.
+  const { chart } = trendHtml([
+    { generated_at: '2026-08-01', verdict: 'FAIL', counts: { blocking: '"><img src=x onerror=alert(1)>' } },
+  ]);
+  assert.ok(!chart.includes('<img'), `markup survived in chart: ${chart}`);
 });
 
 /* ---------------- report ---------------- */

@@ -972,22 +972,70 @@ $('cards-inventory').addEventListener('click', async (ev) => {
   host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   try {
     const r = await api(`/api/file?path=${encodeURIComponent(path)}`);
-    host.innerHTML = `<div class="body">
-        <div class="peek-head">
-          <b class="mono">${escapeHtml(shortPath(r.path))}</b>
-          <span class="muted" style="font-size:12px">${num(r.text.split('\n').length)} 行</span>
-          <span class="grow"></span>
-          <button class="dismiss" type="button">關閉</button>
-        </div>
-        <pre>${escapeHtml(r.text)}</pre>
-      </div>`;
-    host.querySelector('.dismiss').onclick = () => {
-      host.hidden = true;
-    };
+    renderPeek(host, r.path, r.text);
   } catch (e) {
     host.innerHTML = `<div class="body"><div class="result bad"><b>讀不到</b><div>${escapeHtml(e.message)}</div></div></div>`;
   }
 });
+
+/* Viewing, then editing, in one panel.
+ *
+ * The catalogue could show you that a description had no trigger and then leave
+ * you to find the file yourself. Saving goes through the same backed-up change
+ * set as every other write, so an edit made here is as reversible as a fix -
+ * and the server refuses vendor-owned and canonical-generated files with the
+ * reason, because those two edits look like they work and then disappear.
+ */
+function renderPeek(host, path, text) {
+  const lines = text.split('\n').length;
+  host.innerHTML = `<div class="body">
+      <div class="peek-head">
+        <b class="mono">${escapeHtml(shortPath(path))}</b>
+        <span class="muted" style="font-size:12px" id="peek-lines">${num(lines)} 行</span>
+        <span class="grow"></span>
+        <button id="peek-edit" type="button">編輯</button>
+        <button class="dismiss" type="button">關閉</button>
+      </div>
+      <pre id="peek-body">${escapeHtml(text)}</pre>
+    </div>`;
+  host.querySelector('.dismiss').onclick = () => {
+    host.hidden = true;
+  };
+  $('peek-edit').onclick = () => startEdit(host, path, text);
+}
+
+function startEdit(host, path, text) {
+  const body = $('peek-body');
+  body.outerHTML = `<textarea id="peek-edit-area" spellcheck="false">${escapeHtml(text)}</textarea>`;
+  const head = host.querySelector('.peek-head');
+  $('peek-edit').outerHTML =
+    '<button id="peek-save" class="primary" type="button">儲存</button>' +
+    '<button id="peek-cancel" type="button">取消</button>';
+  head.insertAdjacentHTML('beforeend', '<div id="peek-msg" class="sub" style="flex-basis:100%"></div>');
+
+  $('peek-cancel').onclick = () => renderPeek(host, path, text);
+  $('peek-save').onclick = async () => {
+    const next = $('peek-edit-area').value;
+    if (next === text) {
+      $('peek-msg').textContent = '沒有變更。';
+      return;
+    }
+    $('peek-msg').textContent = '儲存中…';
+    try {
+      const r = await action('/api/actions/edit', { path, text: next });
+      renderPeek(host, path, next);
+      host.querySelector('.peek-head').insertAdjacentHTML(
+        'beforeend',
+        `<div class="sub" style="flex-basis:100%">✓ 已儲存。還原點 <span class="mono">${escapeHtml(
+          (r.backup || '').split('/').pop(),
+        )}</span> —— 到「同步狀態」分頁可以還原。</div>`,
+      );
+      await loadAll(true);
+    } catch (e) {
+      $('peek-msg').innerHTML = `<span class="bad">存不了：${escapeHtml(e.message)}</span>`;
+    }
+  };
+}
 
 /* Moving a file out is the action the catalogue was missing: CB007 could report
  * 71 never-invoked skills and there was no way to act on any of them.

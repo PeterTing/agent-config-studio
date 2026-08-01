@@ -4893,3 +4893,389 @@ class PluginKeySpacesDoNotGetMixed(unittest.TestCase):
         counts = plugin_usage(idx, self._inv())
         self.assertEqual(counts.get("plug"), 4)
         self.assertNotIn("plug@m1", counts)
+
+
+class EditingRefusesWhatItCannotHonour(unittest.TestCase):
+    """Reading was the whole of "read and manage" until now.
+
+    Saving goes through the same backed-up change set as every other write, so an
+    edit made here is as reversible as a fix. The refusals matter as much as the
+    write: two kinds of file accept an edit and then lose it, and a tool that
+    lets you type into them is worse than one that has no editor at all.
+    """
+
+    def setUp(self):
+        from studio import server
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.join(self._tmp.name, "config")
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(self.root)
+        os.makedirs(self.repo)
+        self.handler = server.Handler.__new__(server.Handler)
+        self.handler.repo_root = self.repo
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, name, text="---\nname: x\n---\nbody\n"):
+        path = os.path.join(self.root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def _edit(self, path, text, *, create=False, inv=None, generated=()):
+        from studio import server
+        from studio.model import Inventory
+        from studio.rules import Config
+
+        inv = inv or Inventory()
+        inv.roots = {"claude": self.root}
+        cfg = Config(repo_root=self.repo)
+        cfg.generated = list(generated)
+        with mock.patch.object(server, "_inventory", return_value=inv), mock.patch.object(
+            Config, "load", staticmethod(lambda _root: cfg)
+        ):
+            return server.Handler._edit(self.handler, path, text, create=create)
+
+    def test_an_edit_is_written_and_backed_up(self):
+        path = self._write("skills/mine/SKILL.md")
+        result = self._edit(path, "changed\n")
+        self.assertNotIn("error", result)
+        self.assertEqual(open(path, encoding="utf-8").read(), "changed\n")
+        self.assertTrue(result.get("backup"), "no restore point recorded")
+
+    def test_the_backup_can_be_rolled_back(self):
+        """An editor without an undo is a way to lose work."""
+        from studio import patch as patch_mod
+
+        path = self._write("skills/mine/SKILL.md", "original\n")
+        result = self._edit(path, "changed\n")
+        patch_mod.rollback(self.repo, os.path.basename(result["backup"]))
+        self.assertEqual(open(path, encoding="utf-8").read(), "original\n")
+
+    def test_creating_a_file_works(self):
+        path = os.path.join(self.root, "skills", "new", "SKILL.md")
+        result = self._edit(path, "hello\n", create=True)
+        self.assertTrue(result.get("created"), result)
+        self.assertEqual(open(path, encoding="utf-8").read(), "hello\n")
+
+    def test_creating_over_an_existing_file_is_refused(self):
+        """Otherwise "new file" silently overwrites something."""
+        path = self._write("skills/mine/SKILL.md", "keep me\n")
+        self.assertIn("error", self._edit(path, "clobber\n", create=True))
+        self.assertEqual(open(path, encoding="utf-8").read(), "keep me\n")
+
+    def test_a_vendor_file_is_refused_and_says_why(self):
+        """A plugin upgrade overwrites it, so the save would look like it worked
+        and quietly revert later."""
+        from studio.model import Inventory
+
+        path = self._write("plug/SKILL.md")
+        inv = Inventory()
+        inv.skills = [
+            Skill(
+                id="s",
+                name="s",
+                dir_name="s",
+                path=path,
+                runtime=Runtime.CLAUDE,
+                origin=Origin.PLUGIN,
+                description="d",
+                body_lines=1,
+                plugin="p@m",
+            )
+        ]
+        err = self._edit(path, "changed\n", inv=inv).get("error", "")
+        self.assertIn("plugin", err)
+        self.assertIn("p@m", err, "does not say which plugin to disable")
+        self.assertEqual(open(path, encoding="utf-8").read(), "---\nname: x\n---\nbody\n")
+
+    def test_a_toolkit_file_is_refused(self):
+        """Same failure mode, different owner: it lives in a local-looking path
+        but the toolkit rewrites it on upgrade."""
+        from studio.model import Inventory
+
+        path = self._write("gstack/SKILL.md")
+        inv = Inventory()
+        inv.skills = [
+            Skill(
+                id="s",
+                name="s",
+                dir_name="s",
+                path=path,
+                runtime=Runtime.CLAUDE,
+                origin=Origin.TOOLKIT,
+                description="d",
+                body_lines=1,
+            )
+        ]
+        self.assertIn("error", self._edit(path, "changed\n", inv=inv))
+
+    def test_a_generated_file_is_refused_and_names_its_source(self):
+        """Editing the rendered file is exactly the drift MR003 exists to catch,
+        so the editor must not be the thing that causes it."""
+        path = self._write("CLAUDE.md", "generated\n")
+        err = self._edit(
+            path,
+            "hand edited\n",
+            generated=[{"target": path, "sources": ["canonical/core.md"]}],
+        ).get("error", "")
+        self.assertIn("canonical/core.md", err)
+        self.assertEqual(open(path, encoding="utf-8").read(), "generated\n")
+
+    def test_a_path_outside_the_roots_is_refused(self):
+        outside = os.path.join(self._tmp.name, "elsewhere.md")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("untouched\n")
+        self.assertIn("error", self._edit(outside, "changed\n"))
+        self.assertEqual(open(outside, encoding="utf-8").read(), "untouched\n")
+
+    def test_a_credential_file_is_refused(self):
+        path = self._write("auth.json", "{}\n")
+        self.assertIn("error", self._edit(path, "changed\n"))
+
+    def test_other_files_in_a_vendor_skill_directory_are_refused(self):
+        """Vendor ownership belongs to the install, not to the one file the
+        scanner indexed: a skill directory also holds the reference material and
+        scripts the skill loads, and the same upgrade overwrites those."""
+        from studio.model import Inventory
+
+        skill = self._write("plugins/cache/m/p/1.0/skills/s/SKILL.md")
+        helper = self._write("plugins/cache/m/p/1.0/skills/s/helper.py", "print(1)\n")
+        inv = Inventory()
+        inv.skills = [
+            Skill(
+                id="s",
+                name="s",
+                dir_name="s",
+                path=skill,
+                runtime=Runtime.CLAUDE,
+                origin=Origin.PLUGIN,
+                description="d",
+                body_lines=1,
+                plugin="p@m",
+            )
+        ]
+        self.assertIn("error", self._edit(helper, "attack\n", inv=inv))
+        self.assertEqual(open(helper, encoding="utf-8").read(), "print(1)\n")
+
+    def test_a_declared_vendored_file_is_refused(self):
+        """governance.json already records which files an external tool re-copies
+        on upgrade, and the rules consult it. The editor has to ask the same
+        question or it contradicts them."""
+        from studio.rules import Config
+
+        path = self._write("skills/upstream/SKILL.md", "upstream\n")
+        cfg = Config(repo_root=self.repo)
+        cfg.vendored = [{"path": path, "reason": "re-copied by gstack on upgrade"}]
+        from studio import server
+        from studio.model import Inventory
+
+        inv = Inventory()
+        inv.roots = {"claude": self.root}
+        with mock.patch.object(server, "_inventory", return_value=inv), mock.patch.object(
+            Config, "load", staticmethod(lambda _root: cfg)
+        ):
+            result = server.Handler._edit(self.handler, path, "changed\n", create=False)
+        self.assertIn("gstack", result.get("error", ""))
+        self.assertEqual(open(path, encoding="utf-8").read(), "upstream\n")
+
+    def test_a_symlink_inside_the_roots_is_still_refused(self):
+        """Confinement is not enough on its own.
+
+        This link resolves to another file *inside* the audited roots, so every
+        path check passes - and the write would then modify a different file
+        from the one whose name the page showed. The editor names one file and
+        must edit that file or nothing.
+        """
+        real = self._write("skills/real/SKILL.md", "real content\n")
+        link = os.path.join(self.root, "looks-separate.md")
+        os.symlink(real, link)
+        self.assertIn("error", self._edit(link, "attack\n"))
+        self.assertEqual(open(real, encoding="utf-8").read(), "real content\n")
+
+    def test_a_symlink_pointing_out_of_the_roots_is_refused(self):
+        target = os.path.join(self._tmp.name, "outside.md")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("outside\n")
+        link = os.path.join(self.root, "looks-local.md")
+        os.symlink(target, link)
+        self.assertIn("error", self._edit(link, "attack\n"))
+        self.assertEqual(open(target, encoding="utf-8").read(), "outside\n")
+
+    def test_a_file_that_is_not_utf8_is_refused(self):
+        """The preview decodes with errors="replace", so saving it back would
+        write U+FFFD over bytes the editor never showed."""
+        path = os.path.join(self.root, "binaryish.md")
+        with open(path, "wb") as fh:
+            fh.write(b"front\xffback\n")
+        self.assertIn("error", self._edit(path, "front\ufffdback\nedited\n"))
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b"front\xffback\n", "original bytes were rewritten")
+
+    def test_saving_identical_text_is_not_a_change(self):
+        """Otherwise every save creates a restore point that restores nothing."""
+        path = self._write("skills/mine/SKILL.md", "same\n")
+        result = self._edit(path, "same\n")
+        self.assertTrue(result.get("unchanged"))
+        self.assertIsNone(result.get("backup"))
+
+
+class QuarantineStaysInsideTheConfigRoots(unittest.TestCase):
+    """The other write path that takes a path from the page.
+
+    Its confinement check had no test at all: removing it left the whole suite
+    green while the endpoint would move any file on the disk into the repo.
+    """
+
+    def setUp(self):
+        from studio import server
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.join(self._tmp.name, "config")
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(self.root)
+        os.makedirs(self.repo)
+        self.handler = server.Handler.__new__(server.Handler)
+        self.handler.repo_root = self.repo
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _quarantine(self, path):
+        from studio import server
+        from studio.model import Inventory
+
+        inv = Inventory()
+        inv.roots = {"claude": self.root}
+        with mock.patch.object(server, "_inventory", return_value=inv):
+            return server.Handler._quarantine(self.handler, path)
+
+    def test_a_file_outside_the_roots_is_left_alone(self):
+        outside = os.path.join(self._tmp.name, "elsewhere.md")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("untouched\n")
+        self.assertIn("error", self._quarantine(outside))
+        self.assertTrue(os.path.exists(outside), "a file outside the config roots was moved")
+
+    def test_a_file_inside_the_roots_is_moved_with_a_copy_kept(self):
+        inside = os.path.join(self.root, "stray.md")
+        with open(inside, "w", encoding="utf-8") as fh:
+            fh.write("content\n")
+        result = self._quarantine(inside)
+        self.assertNotIn("error", result)
+        self.assertFalse(os.path.exists(inside))
+        self.assertEqual(open(result["copy"], encoding="utf-8").read(), "content\n")
+
+    def test_an_empty_file_still_leaves_a_copy(self):
+        """The copy of a zero-byte file read as "no change" and was dropped,
+        while the delete went ahead - so quarantine destroyed the one kind of
+        file it was most likely to be pointed at."""
+        empty = os.path.join(self.root, "settings.json.bak")
+        open(empty, "w").close()
+        result = self._quarantine(empty)
+        self.assertFalse(os.path.exists(empty))
+        self.assertTrue(os.path.isfile(result["copy"]), "file deleted without a copy")
+
+
+class ASavedChangeSetAppliesTheSamePlanItRecorded(unittest.TestCase):
+    """`studio apply` reads back what was reviewed, so anything left out of the
+    payload silently changes the plan between review and execution."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_directory_removals_survive_the_round_trip(self):
+        """They were dropped, so a saved set applied its file edits and skipped
+        the cleanup - leaving the empty directory the change existed to remove."""
+        from studio import patch as patch_mod
+
+        empty = os.path.join(self._tmp.name, "gone")
+        os.makedirs(empty)
+        cs = patch_mod.ChangeSet(
+            name="t",
+            changes=[
+                patch_mod.Change(
+                    path=os.path.join(self._tmp.name, "a.md"), new_text="x", action="create"
+                )
+            ],
+            remove_dirs=[empty],
+        )
+        patch_mod.save(cs, self._tmp.name)
+        payload = [
+            f
+            for f in os.listdir(os.path.join(self._tmp.name, "var", "patches"))
+            if f.endswith("payload.json")
+        ]
+        back = patch_mod.load(os.path.join(self._tmp.name, "var", "patches", payload[0]))
+        self.assertEqual(back.remove_dirs, [empty])
+
+    def test_the_reloaded_set_still_reports_it_has_work(self):
+        """has_work() counts directory removals, so dropping them could also make
+        a real change set look like a no-op."""
+        from studio import patch as patch_mod
+
+        empty = os.path.join(self._tmp.name, "gone")
+        os.makedirs(empty)
+        cs = patch_mod.ChangeSet(name="t", remove_dirs=[empty])
+        patch_mod.save(cs, self._tmp.name)
+        payload = [
+            f
+            for f in os.listdir(os.path.join(self._tmp.name, "var", "patches"))
+            if f.endswith("payload.json")
+        ]
+        back = patch_mod.load(os.path.join(self._tmp.name, "var", "patches", payload[0]))
+        self.assertTrue(back.has_work())
+
+
+class WritingNeverFollowsADanglingSymlink(unittest.TestCase):
+    """Applies to every write, not just the editor.
+
+    Writing through a link that resolves is correct - a toolkit installs its
+    skills that way, and replacing the link with a regular file severs whatever
+    manages it. A dangling link has no file to update, so the write creates one
+    wherever the link points, which can be anywhere on the disk.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_a_create_through_a_dangling_link_is_refused(self):
+        from studio import patch as patch_mod
+
+        outside = os.path.join(self._tmp.name, "outside.md")
+        link = os.path.join(self._tmp.name, "empty.md")
+        os.symlink(outside, link)
+        cs = patch_mod.ChangeSet(
+            name="t", changes=[patch_mod.Change(path=link, new_text="", action="create")]
+        )
+        with self.assertRaises(OSError):
+            patch_mod.apply(cs, self.repo)
+        self.assertFalse(os.path.exists(outside), "the link's target was created")
+
+    def test_a_link_that_resolves_is_still_written_through(self):
+        """The behaviour this must not break: severing the link would lose the
+        toolkit's ownership of the file."""
+        from studio import patch as patch_mod
+
+        real = os.path.join(self._tmp.name, "real.md")
+        with open(real, "w", encoding="utf-8") as fh:
+            fh.write("old\n")
+        link = os.path.join(self._tmp.name, "link.md")
+        os.symlink(real, link)
+        cs = patch_mod.ChangeSet(
+            name="t", changes=[patch_mod.Change(path=link, new_text="new\n", action="modify")]
+        )
+        patch_mod.apply(cs, self.repo)
+        self.assertTrue(os.path.islink(link), "the symlink was replaced by a regular file")
+        self.assertEqual(open(real, encoding="utf-8").read(), "new\n")

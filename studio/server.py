@@ -355,6 +355,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "/api/actions/waive",
                 "/api/actions/quarantine",
                 "/api/actions/consolidate",
+                "/api/actions/edit",
             ):
                 refusal = self._authorised()
                 if refusal:
@@ -381,6 +382,15 @@ class Handler(SimpleHTTPRequestHandler):
                             b.get("path") or "",
                             b.get("reason") or "",
                             bool(b.get("remove")),
+                        )
+                    )
+                if route == "/api/actions/edit":
+                    b = self._body()
+                    return self._send(
+                        self._edit(
+                            b.get("path") or "",
+                            b.get("text") if b.get("text") is not None else "",
+                            create=bool(b.get("create")),
                         )
                     )
                 if route == "/api/actions/quarantine":
@@ -707,6 +717,125 @@ class Handler(SimpleHTTPRequestHandler):
         _fresh_inventory()
         return {"quarantined": full, "copy": dest, "backup": result["backup"]}
 
+    def _writable_reason(self, full: str, requested: str, inv) -> str | None:
+        """Why this path must not be written from the dashboard, or None.
+
+        Three separate refusals, because each has a different right answer and
+        saying "cannot edit" for all of them would be useless:
+
+        * outside the audited roots - nothing here has any business there;
+        * vendor-owned - a plugin or toolkit upgrade overwrites the edit, so
+          saving would look like it worked and quietly revert later;
+        * generated from ``canonical/`` - editing the rendered file is the exact
+          drift MR003 exists to catch, and the fix is to edit the source.
+        """
+        allowed = [os.path.realpath(r) for r in inv.roots.values() if r]
+        if not any(full.startswith(a + os.sep) for a in allowed):
+            return "path outside the audited config roots"
+        if self._is_credential(full):
+            return "credential file — this tool never reads or writes secrets"
+
+        # Vendor ownership belongs to the *install*, not to the one file the
+        # scanner happened to index. A plugin's skill directory also holds
+        # reference material and scripts the skill loads, and those are
+        # overwritten by the same upgrade - so the check is "under a vendor
+        # skill's directory", not "is that exact SKILL.md".
+        for s in inv.skills:
+            if s.origin.value not in ("plugin", "toolkit"):
+                continue
+            owned = os.path.dirname(os.path.realpath(s.path))
+            if full == os.path.realpath(s.path) or full.startswith(owned + os.sep):
+                where = (
+                    f"停用 plugin {s.plugin}" if s.origin.value == "plugin" else "用工具組自己的指令"
+                )
+                return (
+                    f"這個檔案是 {s.origin.value} 帶進來的，改了會被下次升級覆蓋。"
+                    f"要移除請{where}。"
+                )
+
+        cfg = Config.load(self.repo_root)
+        # The same question the rules ask, asked the same way: governance.json
+        # already declares which files an external tool re-copies on upgrade.
+        # Declarations are written the way a person writes a path -
+        # `~/.codex/skills/x/SKILL.md` - so they are matched against every
+        # spelling of this file, not only the fully resolved one. On macOS
+        # /var resolves to /private/var, and matching realpath alone silently
+        # stopped recognising declared files.
+        home = os.path.expanduser("~")
+        spellings = {full, requested}
+        spellings |= {s.replace(home, "~", 1) for s in (full, requested) if s.startswith(home)}
+        declared = next(
+            (r for r in (cfg.vendored_reason(s) for s in sorted(spellings)) if r), None
+        )
+        if declared:
+            return f"這個檔案由外部工具管理，改了會被覆蓋：{declared}"
+        for spec in cfg.generated:
+            if os.path.realpath(os.path.expanduser(spec.get("target", ""))) == full:
+                sources = "、".join(spec.get("sources", [])) or "canonical/"
+                return (
+                    f"這個檔案是從 {sources} 產生的。直接改會被 MR003 抓到漂移，"
+                    "請改來源再跑 `studio sync --apply`。"
+                )
+        return None
+
+    def _edit(self, path: str, text: str, *, create: bool) -> dict:
+        """Write a config file through the same backed-up change set as every
+        other write, so an edit made here is reviewable and reversible exactly
+        like one made by a fix."""
+        if not path:
+            return {"error": "path required"}
+        if not isinstance(text, str):
+            return {"error": "text must be a string"}
+        requested = os.path.abspath(os.path.expanduser(path))
+        full = os.path.realpath(requested)
+        inv = _inventory(False)
+        refusal = self._writable_reason(full, requested, inv)
+        if refusal:
+            return {"error": refusal}
+
+        if os.path.islink(requested):
+            # `full` is the resolved target and passed the checks above, but the
+            # write goes through the link - and for a create the link may be
+            # dangling, so the file lands wherever it points. Editing a config
+            # file through a link is never what someone means here.
+            return {"error": "這是一個 symlink，請直接編輯它指向的檔案"}
+
+        exists = os.path.isfile(full)
+        if create and exists:
+            return {"error": "檔案已存在，改用編輯"}
+        if not create and not exists:
+            return {"error": "not a file"}
+        if exists:
+            # The preview decodes with errors="replace", so a file that is not
+            # valid UTF-8 shows as U+FFFD and saving it back would write those
+            # replacements over the original bytes. Refuse rather than silently
+            # rewrite bytes the editor never actually showed.
+            try:
+                with open(full, "rb") as fh:
+                    fh.read().decode("utf-8")
+            except UnicodeDecodeError:
+                return {"error": "這個檔案不是有效的 UTF-8，編輯會破壞原始位元組，請用其他編輯器"}
+        if not exists and not os.path.isdir(os.path.dirname(full)):
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+
+        cs = patch.ChangeSet(
+            name="edit-file" if exists else "create-file",
+            description=f"{'Edit' if exists else 'Create'} {os.path.basename(full)} from the dashboard.",
+            changes=[
+                patch.Change(
+                    path=full,
+                    new_text=text,
+                    action="modify" if exists else "create",
+                    reason="edited in the dashboard",
+                )
+            ],
+        )
+        if not cs.has_work():
+            return {"path": full, "unchanged": True}
+        result = patch.apply(cs, self.repo_root)
+        _fresh_inventory()
+        return {"path": full, "backup": result["backup"], "created": not exists}
+
     def _specs_review(self, urls: list[str]) -> dict:
         """Ask what changed and whether the dependent rules still hold.
 
@@ -899,6 +1028,7 @@ class Handler(SimpleHTTPRequestHandler):
 _COMMAND_FOR = {
     "/api/actions/sync-apply": "python3 -m studio.cli sync --apply",
     "/api/actions/rollback": "python3 -m studio.cli rollback <id>",
+    "/api/actions/edit": "直接用編輯器改該檔案",
     "/api/actions/fix": "python3 -m studio.cli fix --apply",
     "/api/actions/update": "python3 -m studio.cli update --apply",
 }
