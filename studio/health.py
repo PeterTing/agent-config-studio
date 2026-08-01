@@ -313,9 +313,20 @@ def format_text(report: HealthReport, *, show_waived: bool = False) -> str:
     lines.append(f"  rules run: {report.rules_run}   inventory: {report.inventory_counts}")
     meta = (report.metrics or {}).get("preloaded_skill_metadata") or {}
     if meta:
+        # Per runtime, because a session loads one of them. The summed figure
+        # reads as what every conversation pays and no conversation pays it -
+        # the dashboard was corrected and this line was not, so the two
+        # disagreed about the number that motivates the whole cold-skill work.
+        per = meta.get("per_runtime") or {}
+        parts = [
+            f"{name} ~{data.get('est_tokens', 0):,}"
+            for name, data in sorted(per.items())
+            if data.get("est_tokens")
+        ]
+        detail = "、".join(parts) if parts else f"~{meta.get('total_est_tokens', 0):,}"
         lines.append(
-            f"  preloaded skill metadata: ~{meta.get('total_est_tokens', 0):,} tokens total, "
-            f"~{meta.get('avoidable_est_tokens', 0):,} avoidable"
+            f"  preloaded skill metadata per session: {detail} tokens "
+            f"(~{meta.get('avoidable_est_tokens', 0):,} avoidable)"
         )
     if report.updates:
         lines.append(f"  plugin updates: {report.updates}")

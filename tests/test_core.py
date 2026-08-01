@@ -5804,3 +5804,50 @@ class NoRuleShipsUnproven(unittest.TestCase):
             "these rules never produce a finding in any test, so nothing verifies "
             f"they detect what they claim: {missing}",
         )
+
+
+class ThePreloadFigureIsPerSessionEverywhere(unittest.TestCase):
+    """One number, reported the same way in both places it appears.
+
+    A session loads one runtime, so the sum across runtimes is a figure nobody
+    pays. The dashboard was corrected to show it per runtime and the CLI kept
+    printing the total, which left the two disagreeing about the number that
+    motivates the whole cold-skill analysis.
+    """
+
+    def _text(self, per_runtime):
+        from studio.health import HealthReport, format_text
+
+        report = HealthReport(
+            generated_at="2026-08-01T00:00:00+00:00",
+            verdict="PASS",
+            findings=[],
+            counts={"total": 0, "blocking": 0, "waived": 0, "vendor_owned": 0, "minor": 0},
+            by_severity={},
+            by_category={},
+            by_rule={},
+            inventory_counts={},
+            rules_run=0,
+            metrics={
+                "preloaded_skill_metadata": {
+                    "per_runtime": per_runtime,
+                    "total_est_tokens": sum(v["est_tokens"] for v in per_runtime.values()),
+                    "avoidable_est_tokens": 0,
+                }
+            },
+        )
+        return format_text(report)
+
+    def test_each_runtime_is_named_with_its_own_figure(self):
+        out = self._text({"claude": {"est_tokens": 10126}, "codex": {"est_tokens": 4896}})
+        self.assertIn("10,126", out)
+        self.assertIn("4,896", out)
+
+    def test_the_sum_is_not_presented_as_the_cost(self):
+        """15,023 is what a reader acts on if it is the number they are shown."""
+        out = self._text({"claude": {"est_tokens": 10126}, "codex": {"est_tokens": 4896}})
+        self.assertNotIn("15,023", out)
+
+    def test_a_single_runtime_setup_still_reports_its_cost(self):
+        out = self._text({"claude": {"est_tokens": 10126}})
+        self.assertIn("10,126", out)
