@@ -208,8 +208,10 @@ def hk005(inv: Inventory, cfg: Config):
         yield make(
             REG["HK005"],
             f"hook declares `if: {h.if_rule}` yet its command also fires on empty "
-            "input (see HK001). If the gate ever fails open, the message appears on "
-            "unrelated calls; the command must be self-guarding regardless.",
+            "input (see HK001). The documentation states the filter is best-effort "
+            "and fails open, running the hook regardless of the pattern, when the "
+            "Bash command cannot be parsed - so the message reaches unrelated calls "
+            "and the command must be self-guarding on its own.",
             path=h.source,
             evidence={"event": h.event, "if_rule": h.if_rule, "command_excerpt": h.command[:200]},
             remedy="Make the command exit early on empty diff so correctness does not "

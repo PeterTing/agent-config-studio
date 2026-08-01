@@ -2,7 +2,7 @@
   "specs": {
     "https://claude.com/blog/the-new-rules-of-context-engineering-for-claude-5-generation-models": {
       "hash": "05e84a74623aa5dbff1a44ebb6a3f63e",
-      "recorded_at": "2026-07-29T11:54:04+00:00",
+      "recorded_at": "2026-08-01T14:00:53+00:00",
       "rules": [
         "CB002",
         "CB003",
@@ -23,8 +23,8 @@
       ]
     },
     "https://code.claude.com/docs/en/hooks": {
-      "hash": "79f6405595786a167c65109dbdf950f8",
-      "recorded_at": "2026-07-29T11:54:04+00:00",
+      "hash": "06bb22f5a1d2e7469470555e49f3e37c",
+      "recorded_at": "2026-08-01T14:00:53+00:00",
       "rules": [
         "HK001",
         "HK002",
@@ -34,7 +34,7 @@
     },
     "https://code.claude.com/docs/en/memory": {
       "hash": "791c30eac30d53867fbbc3301e1b9017",
-      "recorded_at": "2026-07-29T11:54:04+00:00",
+      "recorded_at": "2026-08-01T14:00:53+00:00",
       "rules": [
         "IN001",
         "IN006",
@@ -50,7 +50,7 @@
     },
     "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices": {
       "hash": "e1a565a9735085f5bee380f362a46700",
-      "recorded_at": "2026-07-29T11:54:04+00:00",
+      "recorded_at": "2026-08-01T14:00:53+00:00",
       "rules": [
         "CB001",
         "SK001",
@@ -75,15 +75,15 @@
     },
     "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5": {
       "hash": "80481252dbb55dadb4f4ddc1ec69c16b",
-      "recorded_at": "2026-07-29T11:54:04+00:00",
+      "recorded_at": "2026-08-01T14:00:53+00:00",
       "rules": [
         "IN002",
         "IN003"
       ]
     },
     "https://code.claude.com/docs/en/sub-agents": {
-      "hash": "545bd9633a5383906905cadaa304a21f",
-      "recorded_at": "2026-07-29T11:54:04+00:00",
+      "hash": "968f6d3d128fa8eb940b1ebeb00eafb3",
+      "recorded_at": "2026-08-01T14:00:53+00:00",
       "rules": [
         "AG001",
         "AG002",
@@ -93,6 +93,6 @@
       ]
     }
   },
-  "updated_at": "2026-07-29T11:54:04+00:00",
+  "updated_at": "2026-08-01T14:00:53+00:00",
   "note": "Hashes of the documents each rule cites. `studio specs check` compares against these; a difference means the guidance moved and the rules that depend on it should be re-read. Never updated automatically - accepting a new baseline is a statement that you have reviewed the change."
 }
