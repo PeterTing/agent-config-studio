@@ -41,6 +41,53 @@ _WHEN_RE = re.compile(
 )
 
 
+#: A path-shaped token in prose: a run of path characters ending in ``.md``.
+#: Bounded so that ``security.md.bak`` does not read as a reference to
+#: ``security.md`` - a substring test called an orphaned backup a live reader and
+#: downgraded the finding that would have got it cleaned up.
+_PATH_TOKEN_RE = re.compile(r"[~\w./\\-]*\.md\b(?!\.)")
+
+
+def _reference_index(inv: Inventory) -> dict[str, list[str]]:
+    """Map every resolved ``.md`` path mentioned anywhere to the files mentioning it.
+
+    Built once per run. Asking the question per agent instead re-read the whole
+    corpus each time - 1,135 files x 11 agents, 66 seconds - for an answer that
+    does not change between agents.
+
+    References are resolved rather than compared as text, because the same file
+    is written three ways: ``~/.claude/agents/x.md``, the expanded absolute path,
+    and ``../agents/x.md`` relative to the referring file. Matching only the
+    literal spelling reports the other two as unreferenced.
+    """
+    from .. import safeio
+
+    index: dict[str, list[str]] = {}
+    sources = (
+        list(inv.commands)
+        + list(inv.workflows)
+        + list(inv.instructions)
+        + list(inv.skills)
+        + list(inv.agents)
+    )
+    for src in sources:
+        text = safeio.read_text(src.path) or ""
+        if ".md" not in text:
+            continue
+        base = os.path.dirname(src.path)
+        here = os.path.realpath(src.path)
+        for token in set(_PATH_TOKEN_RE.findall(text)):
+            expanded = os.path.expanduser(token)
+            candidate = expanded if os.path.isabs(expanded) else os.path.join(base, expanded)
+            resolved = os.path.realpath(candidate)
+            if resolved == here:
+                continue  # a file does not reference itself
+            readers = index.setdefault(resolved, [])
+            if src.path not in readers:
+                readers.append(src.path)
+    return index
+
+
 @rule(
     "AG001",
     "Subagent file has no frontmatter, so it never loads",
@@ -51,27 +98,50 @@ _WHEN_RE = re.compile(
 def ag001(inv: Inventory, cfg: Config):
     """A subagent's identity comes only from its ``name`` frontmatter field.
 
-    Without a frontmatter block there is no name, so Claude Code cannot register
-    or invoke the file no matter what the body says. The file looks like working
-    configuration in a directory listing, which is what makes this worth
-    reporting loudly: someone routes work to a reviewer that does not exist.
+    Without a frontmatter block there is no name, so Claude Code never registers
+    the file and nothing can *delegate* to it. Whether anything *reads* it is a
+    separate question, and the finding says which, because the two call for
+    opposite actions.
     """
+    index = _reference_index(inv)
     for a in inv.agents:
         if a.frontmatter_present:
             continue
+        readers = index.get(os.path.realpath(a.path), [])
+        if readers:
+            names = ", ".join(sorted({os.path.basename(r) for r in readers}))
+            detail = (
+                f"{os.path.basename(a.path)} has no YAML frontmatter, so Claude Code "
+                f"never registers it as a subagent and nothing can delegate to it. "
+                f"It is not unused, though: {names} reference it by path and read it "
+                "as prompt content. Deleting it would break them."
+            )
+            remedy = (
+                "Add `name` and `description` frontmatter so it can also be delegated "
+                f"to, or leave it as a prompt file that {names} read. Do not delete it."
+            )
+        else:
+            detail = (
+                f"{os.path.basename(a.path)} has no YAML frontmatter, so it declares no "
+                f"`name` and Claude Code never registers it. Its {a.lines} lines are "
+                "unreachable, and nothing else references the path either."
+            )
+            remedy = (
+                "Add a frontmatter block with `name` (lowercase-hyphen) and "
+                "`description` (when to delegate), or remove the file."
+            )
         yield make(
             REG["AG001"],
-            f"{os.path.basename(a.path)} has no YAML frontmatter, so it declares no "
-            f"`name` and Claude Code never registers it. Its {a.lines} lines are "
-            "unreachable; nothing can delegate to it.",
+            detail,
             path=a.path,
             line=1,
-            evidence={"lines": a.lines, "filename_stem": a.name},
-            remedy=(
-                "Add a frontmatter block with `name` (lowercase-hyphen) and "
-                "`description` (when to delegate), or delete the file if it is no "
-                "longer wanted."
-            ),
+            evidence={
+                "lines": a.lines,
+                "filename_stem": a.name,
+                "referenced_by": sorted(readers),
+            },
+            remedy=remedy,
+            severity=Severity.IMPORTANT if readers else Severity.CRITICAL,
         )
 
 

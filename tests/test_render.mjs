@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import {
+  breakdownRows,
   metaBreakdownHtml,
   trendHtml,
   actionLabelHtml,
@@ -485,6 +486,46 @@ test('a single target needs no conjunction', () => {
 test('no targets never claims specific files', () => {
   assert.equal(syncTargetSummary([]), '產生出來的檔案');
   assert.equal(syncTargetSummary(undefined), '產生出來的檔案');
+});
+
+
+/* ---------------- overview breakdown ---------------- */
+
+// The four numbers are shown as a breakdown of one total, so a reader adds them
+// up. They used to be derived by subtracting one overlapping bucket from
+// another, and the overview disagreed with the findings tab as a result.
+const BREAKDOWN = { total: 188, blocking: 11, vendor_owned: 136, minor: 40, waived: 1 };
+
+test('breakdownRows shows each bucket exactly as the report reported it', () => {
+  assert.deepEqual(
+    breakdownRows(BREAKDOWN).map((r) => r.n),
+    [11, 136, 40, 1],
+  );
+});
+
+test('breakdownRows adds up to the reported total', () => {
+  const sum = breakdownRows(BREAKDOWN).reduce((a, r) => a + r.n, 0);
+  assert.equal(sum, BREAKDOWN.total);
+});
+
+test('breakdownRows never derives one row from another', () => {
+  // A vendor-heavy config where subtraction would go negative: the old
+  // `minor - vendor_owned` produced -96 here and was clamped to 0, silently
+  // hiding every local minor finding.
+  const rows = breakdownRows({ total: 141, blocking: 0, vendor_owned: 136, minor: 4, waived: 1 });
+  assert.equal(rows[2].n, 4);
+});
+
+test('breakdownRows marks the actionable row critical only when there is work', () => {
+  assert.equal(breakdownRows({ blocking: 3 })[0].cls, 'critical');
+  assert.equal(breakdownRows({ blocking: 0 })[0].cls, 'ok');
+});
+
+test('breakdownRows tolerates a report with no counts', () => {
+  assert.deepEqual(
+    breakdownRows(undefined).map((r) => r.n),
+    [0, 0, 0, 0],
+  );
 });
 
 /* ---------------- report ---------------- */

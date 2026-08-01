@@ -8,13 +8,19 @@ an unrelated word.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import tempfile
 import textwrap
 import unittest
+from http import HTTPStatus
+from unittest import mock
 
 from studio import fm, refactor, safeio
 from studio.model import (
+    AgentDef,
+    Command,
     Finding,
     Instruction,
     Inventory,
@@ -426,7 +432,9 @@ class PluginClassification(unittest.TestCase):
 
         s = _skill(self.tmp, "unused-thing", "Unused. Use when testing.")
         s.origin = Origin.PLUGIN
-        s.plugin = "lonely-plugin"
+        # Matches the paired Plugin.key: the scanner writes the full
+        # `plugin@marketplace` identifier into both fields.
+        s.plugin = "lonely-plugin@m"
         return Inventory(
             roots={"claude": self.tmp},
             skills=[s],
@@ -2362,7 +2370,7 @@ class EveryUsageRuleTreatsZeroAsEvidence(unittest.TestCase):
                 runtime=Runtime.CLAUDE,
                 origin=Origin.PLUGIN,
                 description="y" * 900,
-                plugin="zz-unheard-of-plugin",
+                plugin="zz-unheard-of-plugin@market",
             )
             for i in range(40)
         ]
@@ -3131,7 +3139,7 @@ class Cb001NeedsCompleteHistoryToo(unittest.TestCase):
                 runtime=Runtime.CLAUDE,
                 origin=Origin.PLUGIN,
                 description="q" * 900,
-                plugin="zz-quiet",
+                plugin="zz-quiet@market",
             )
             for i in range(40)
         ]
@@ -3337,7 +3345,7 @@ class AvoidableCostNeedsCompleteEvidence(unittest.TestCase):
                 runtime=Runtime.CLAUDE,
                 origin=Origin.PLUGIN,
                 description="q" * 800,
-                plugin="zz-quiet",
+                plugin="zz-quiet@market",
             )
             for i in range(5)
         ]
@@ -3675,13 +3683,28 @@ class SubagentRules(unittest.TestCase):
             declared_name=(parsed.text("name") or "").strip(),
         )
 
-    def _inv(self, *agents):
+    def _inv(self, *agents, commands=()):
         inv = Inventory()
         inv.agents = list(agents)
+        inv.commands = list(commands)
         return inv
 
-    def _run(self, fn, *agents):
-        return list(fn(self._inv(*agents), Config(repo_root=".")))
+    def _command(self, text, name="done.md"):
+        """A command file whose body is real text on disk, because the rule reads
+        it rather than trusting a field."""
+        path = os.path.join(self._tmp.name, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return Command(
+            id=f"cmd:{name}",
+            name=name[:-3],
+            path=path,
+            runtime=Runtime.CLAUDE,
+            lines=len(text.splitlines()),
+        )
+
+    def _run(self, fn, *agents, commands=()):
+        return list(fn(self._inv(*agents, commands=commands), Config(repo_root=".")))
 
     def test_no_frontmatter_is_critical(self):
         """Identity comes only from `name`, so a file without frontmatter has no
@@ -4035,3 +4058,838 @@ class PreloadCostIsPerRuntime(unittest.TestCase):
         self.assertEqual(
             pr["claude"]["bytes"] + pr["codex"]["bytes"], m["total_bytes"]
         )
+
+
+class OverlapNeedsSharedRuntime(unittest.TestCase):
+    """Two skills only compete when they are loaded together. A Claude-only
+    skill and a Codex-only one never see each other, so reporting them as
+    competing for one trigger describes a conflict that cannot happen."""
+
+    def _inv(self, *specs):
+        inv = Inventory()
+        inv.skills = [
+            Skill(
+                id=f"s{i}",
+                name=name,
+                dir_name=name,
+                path=f"/h/.{rt}/skills/{name}/SKILL.md",
+                runtime=Runtime.CLAUDE if rt == "claude" else Runtime.CODEX,
+                origin=Origin.LOCAL,
+                description=desc,
+            )
+            for i, (name, rt, desc) in enumerate(specs)
+        ]
+        return inv
+
+    DESC = "Generate unit tests, jest mocks, stubs, fixtures and coverage gaps."
+
+    def test_two_skills_in_the_same_runtime_are_compared(self):
+        from studio.rules.skills import sk017
+
+        inv = self._inv(("qa-one", "claude", self.DESC), ("qa-two", "claude", self.DESC))
+        self.assertEqual(len(list(sk017(inv, Config(repo_root=".")))), 1)
+
+    def test_skills_in_different_runtimes_are_not_compared(self):
+        from studio.rules.skills import sk017
+
+        inv = self._inv(("qa-one", "claude", self.DESC), ("qa-two", "codex", self.DESC))
+        self.assertEqual(list(sk017(inv, Config(repo_root="."))), [])
+
+    def test_a_mirrored_skill_still_competes_in_the_runtime_it_shares(self):
+        """A skill present in both runtimes overlaps with a Codex-only one in
+        Codex, so that pair is real."""
+        from studio.rules.skills import sk017
+
+        inv = self._inv(
+            ("mirrored", "claude", self.DESC),
+            ("mirrored", "codex", self.DESC),
+            ("qa-two", "codex", self.DESC),
+        )
+        out = list(sk017(inv, Config(repo_root=".")))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(sorted(out[0].evidence["skills"]), ["mirrored", "qa-two"])
+
+
+class FilePeekRouteIsGated(unittest.TestCase):
+    """The route that hands out file contents.
+
+    It was the only content endpoint that never called `_from_this_page`, and a
+    request carrying no token and a foreign Origin got HTTP 200 with the body of
+    `~/.codex/auth.json` - OAuth id/access/refresh tokens, a file the OS keeps at
+    0600. Every other endpoint's gate test stayed green throughout, which is why
+    this one exercises the route over HTTP rather than the helper.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        from studio import server
+
+        cls.server_mod = server
+        server.Handler.repo_root = os.path.abspath(".")
+        server.Handler.web_root = os.path.abspath("web")
+        server.Handler.allow_actions = False
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        server.Handler.origin = f"http://127.0.0.1:{cls.port}"
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def _get(self, path, headers):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        url = f"http://127.0.0.1:{self.port}/api/file?path=" + urllib.parse.quote(path)
+        req = urllib.request.Request(url)
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8")
+
+    def _token(self):
+        import urllib.request
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/session") as resp:
+            return json.loads(resp.read())["token"]
+
+    def _get_route(self, route, headers):
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{route}")
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8")
+
+    def test_a_foreign_origin_without_a_token_is_refused(self):
+        """The exact request that leaked the tokens: any page the browser has
+        open can issue it, and nothing about it is authenticated."""
+        status, _ = self._get("~/.claude/CLAUDE.md", {"Origin": "http://evil.example.com"})
+        self.assertEqual(status, HTTPStatus.FORBIDDEN)
+
+    def test_a_request_with_no_token_at_all_is_refused(self):
+        status, _ = self._get("~/.claude/CLAUDE.md", {})
+        self.assertEqual(status, HTTPStatus.FORBIDDEN)
+
+    def test_every_rescan_route_is_gated_not_just_health(self):
+        """`fresh=1` means rescan on whichever route it appears.
+
+        Gating expensive routes one at a time left summary, inventory, graph and
+        updates open - and updates goes to the network - so any page in any tab
+        could start unbounded scans through a door that looked cheap.
+        """
+        for route in ("summary", "inventory", "graph", "updates", "health"):
+            with self.subTest(route=route):
+                status, _ = self._get_route(
+                    f"/api/{route}?fresh=1", {"Origin": "http://evil.example.com"}
+                )
+                self.assertEqual(status, HTTPStatus.FORBIDDEN)
+
+    def test_a_cached_read_is_not_gated(self):
+        """Gating cached reads would cost the page a round trip for nothing, and
+        those responses are already unreadable cross-origin."""
+        status, _ = self._get_route("/api/summary", {})
+        self.assertEqual(status, HTTPStatus.OK)
+
+    def test_the_dashboards_own_request_still_works(self):
+        """A gate that also blocks the real UI is not a fix."""
+        status, body = self._get(
+            os.path.abspath("README.md"), {"X-Studio-Token": self._token()}
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertIn("text", json.loads(body))
+
+
+class CredentialFilesAreNeverShown(unittest.TestCase):
+    """Independent of the gate.
+
+    A config auditor never needs to print a secret to do its job, so the refusal
+    holds even for a request that is fully authenticated - the gate and the
+    deny-list have to be able to fail separately.
+    """
+
+    def setUp(self):
+        from studio import server
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.handler = server.Handler.__new__(server.Handler)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _peek(self, filename, body="secret\n"):
+        from studio import server
+        from studio.model import Inventory
+
+        path = os.path.join(self._tmp.name, filename)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return self._peek_path(path)
+
+    def _peek_path(self, path):
+        from studio import server
+        from studio.model import Inventory
+
+        inv = Inventory()
+        inv.roots = {"tmp": self._tmp.name}
+        self.handler.repo_root = self._tmp.name
+        with mock.patch.object(server, "_inventory", return_value=inv):
+            return server.Handler._file_peek(self.handler, path)
+
+    def test_the_codex_auth_file_is_refused(self):
+        """The file that actually leaked."""
+        self.assertIn("credential", self._peek("auth.json").get("error", ""))
+
+    def test_a_private_key_is_refused(self):
+        self.assertIn("credential", self._peek("server.pem").get("error", ""))
+        self.assertIn("credential", self._peek("id_rsa").get("error", ""))
+
+    def test_the_refusal_does_not_include_the_contents(self):
+        """An error that quotes the file back defeats the point."""
+        result = self._peek("auth.json", body="sk-live-TOPSECRET\n")
+        self.assertNotIn("TOPSECRET", json.dumps(result))
+
+    def test_a_symlink_cannot_launder_a_credential(self):
+        """The check looked at the requested name, and `abspath` leaves links
+        intact - so an innocuous `notes.md` inside an audited root, pointing at
+        `~/.codex/auth.json`, passed both the confinement check and the deny-list
+        and had its target read out."""
+        target = os.path.join(self._tmp.name, "auth.json")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("REFRESH_TOKEN=leaked\n")
+        link = os.path.join(self._tmp.name, "notes.md")
+        os.symlink(target, link)
+        result = self._peek_path(link)
+        self.assertNotIn("leaked", json.dumps(result))
+        self.assertIn("credential", result.get("error", ""))
+
+    def test_a_symlink_cannot_escape_the_audited_roots(self):
+        """Same root cause, different consequence: confinement is also decided on
+        the unresolved path, so any file on the disk was reachable."""
+        outside = tempfile.mkdtemp()
+        try:
+            target = os.path.join(outside, "elsewhere.md")
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("outside-the-roots\n")
+            link = os.path.join(self._tmp.name, "inside.md")
+            os.symlink(target, link)
+            result = self._peek_path(link)
+            self.assertNotIn("outside-the-roots", json.dumps(result))
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
+
+    def test_a_credential_name_is_refused_whatever_it_points_at(self):
+        """Both spellings are checked, not just the resolved one.
+
+        The file opened is always the resolved path, so this cannot leak on its
+        own - it is the conservative half of the pair: something named
+        `auth.json` in a config root is refused without needing to be right
+        about where it leads.
+        """
+        plain = os.path.join(self._tmp.name, "ordinary.md")
+        with open(plain, "w", encoding="utf-8") as fh:
+            fh.write("nothing secret\n")
+        link = os.path.join(self._tmp.name, "auth.json")
+        os.symlink(plain, link)
+        self.assertIn("credential", self._peek_path(link).get("error", ""))
+
+    def test_a_dotenv_is_refused(self):
+        """The dashboard audits repositories, and a repo root holds .env far more
+        often than it holds auth.json."""
+        self.assertIn("credential", self._peek(".env", body="OPENAI_API_KEY=sk-x\n").get("error", ""))
+        self.assertIn("credential", self._peek(".env.local", body="TOKEN=x\n").get("error", ""))
+
+    def test_ordinary_config_is_still_shown(self):
+        """A deny-list that swallows normal files would break the dashboard."""
+        result = self._peek("SKILL.md", body="---\nname: x\n---\nbody\n")
+        self.assertIn("name: x", result.get("text", ""))
+
+
+class UnregisteredIsNotTheSameAsUnused(unittest.TestCase):
+    """AG001 used to say only "never loads", and acting on that reading deleted
+    four reviewer prompts that `/done` reads by path - turning a completion gate
+    into a printed PASS table. The two cases need opposite actions, so the
+    finding has to tell them apart.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _case(self, command_text):
+        from studio.rules.agents import ag001
+
+        agent_path = os.path.join(self._tmp.name, "security.md")
+        with open(agent_path, "w", encoding="utf-8") as fh:
+            fh.write("# Security Reviewer\nOWASP Top 10.\n")
+        cmd_path = os.path.join(self._tmp.name, "done.md")
+        with open(cmd_path, "w", encoding="utf-8") as fh:
+            fh.write(command_text.replace("<AGENT>", agent_path))
+        inv = Inventory()
+        inv.agents = [
+            AgentDef(
+                id="agent:security",
+                name="security",
+                path=agent_path,
+                runtime=Runtime.CLAUDE,
+                lines=2,
+                description="",
+                frontmatter_present=False,
+                declared_name="",
+            )
+        ]
+        inv.commands = [
+            Command(id="cmd:done", name="done", path=cmd_path, runtime=Runtime.CLAUDE, lines=1)
+        ]
+        found = list(ag001(inv, Config(repo_root=".")))
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def test_a_referenced_file_is_not_critical(self):
+        """Blocking severity is what invites deletion."""
+        self.assertEqual(self._case("Read <AGENT> and review.").severity, Severity.IMPORTANT)
+
+    def test_a_referenced_file_names_what_reads_it(self):
+        f = self._case("Read <AGENT> and review.")
+        self.assertIn("done.md", f.detail)
+        self.assertEqual([os.path.join(self._tmp.name, "done.md")], f.evidence["referenced_by"])
+
+    def test_a_referenced_file_is_never_told_to_be_deleted(self):
+        """The remedy is the part a person acts on."""
+        f = self._case("Read <AGENT> and review.")
+        self.assertNotIn("remove the file", f.remedy.lower())
+        self.assertNotIn("delete the file", f.remedy.lower())
+
+    def test_an_unreferenced_file_is_still_critical(self):
+        """The original finding was right about this case and must stay."""
+        f = self._case("This command references nothing.")
+        self.assertEqual(f.severity, Severity.CRITICAL)
+        self.assertEqual(f.evidence["referenced_by"], [])
+
+    def test_a_tilde_reference_counts(self):
+        """Commands write `~/.claude/agents/...`, not the expanded path, so
+        matching only the absolute form would report every one as unreferenced."""
+        from studio.rules.agents import ag001
+
+        home = os.path.expanduser("~")
+        agent_path = os.path.join(home, ".claude", "agents", "reviewers", "security.md")
+        cmd_path = os.path.join(self._tmp.name, "done.md")
+        with open(cmd_path, "w", encoding="utf-8") as fh:
+            fh.write("Run `~/.claude/agents/reviewers/security.md`.\n")
+        inv = Inventory()
+        inv.agents = [
+            AgentDef(
+                id="agent:security",
+                name="security",
+                path=agent_path,
+                runtime=Runtime.CLAUDE,
+                lines=2,
+                description="",
+                frontmatter_present=False,
+                declared_name="",
+            )
+        ]
+        inv.commands = [
+            Command(id="cmd:done", name="done", path=cmd_path, runtime=Runtime.CLAUDE, lines=1)
+        ]
+        (found,) = list(ag001(inv, Config(repo_root=".")))
+        self.assertEqual(found.severity, Severity.IMPORTANT)
+
+
+class MarketplaceIsPartOfPluginIdentity(unittest.TestCase):
+    """The same plugin name can be installed from two marketplaces and enabled in
+    only one. Keying on the bare name made the disabled install look enabled,
+    counted its skills as preloaded, and produced a finding for every one of them
+    saying a skill that is never loaded is never loaded.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _enabled(self, mapping):
+        from studio import scan
+
+        path = os.path.join(self._tmp.name, "settings.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"enabledPlugins": mapping}, fh)
+        with mock.patch.object(scan, "CLAUDE_DIR", self._tmp.name):
+            return scan._enabled_plugin_keys()
+
+    def test_the_disabled_install_is_not_treated_as_enabled(self):
+        """The exact shape in the setup this was found on."""
+        enabled = self._enabled(
+            {
+                "superpowers@claude-plugins-official": False,
+                "superpowers@superpowers-marketplace": True,
+            }
+        )
+        self.assertNotIn("superpowers@claude-plugins-official", enabled)
+        self.assertIn("superpowers@superpowers-marketplace", enabled)
+
+    def test_the_marketplace_is_kept_in_the_key(self):
+        """A bare name cannot distinguish the two installs, so dropping the
+        marketplace reintroduces the defect no matter what else is correct."""
+        for key in self._enabled({"superpowers@superpowers-marketplace": True}):
+            self.assertIn("@", key)
+
+    def test_a_disabled_plugin_contributes_no_skills(self):
+        """End to end: the count, not just the key set."""
+        from studio import scan
+
+        cache = os.path.join(self._tmp.name, "plugins", "cache")
+        for market in ("official", "other"):
+            d = os.path.join(cache, market, "p", "1.0.0", "skills", "s")
+            os.makedirs(d)
+            with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write("---\nname: s\ndescription: Use when testing.\n---\nbody\n")
+        with open(os.path.join(self._tmp.name, "settings.json"), "w", encoding="utf-8") as fh:
+            json.dump({"enabledPlugins": {"p@official": False, "p@other": True}}, fh)
+        os.makedirs(os.path.join(self._tmp.name, "plugins"), exist_ok=True)
+        with open(
+            os.path.join(self._tmp.name, "plugins", "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as fh:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        key: [
+                            {
+                                "scope": "user",
+                                "installPath": os.path.join(cache, market, "p", "1.0.0"),
+                            }
+                        ]
+                        for key, market in (("p@official", "official"), ("p@other", "other"))
+                    },
+                },
+                fh,
+            )
+        with mock.patch.object(scan, "CLAUDE_DIR", self._tmp.name):
+            skills, _per_plugin = scan._scan_plugin_skills([])
+        self.assertEqual(
+            len(skills), 1, f"disabled install still contributed: {[s.path for s in skills]}"
+        )
+        self.assertIn(os.sep + "other" + os.sep, skills[0].path)
+
+
+class CountsArePartitioned(unittest.TestCase):
+    """The four numbers are read as a breakdown, so they have to add up.
+
+    They used to overlap - a vendor minor finding was counted in both buckets -
+    and the dashboard derived the local-minor figure by subtracting one from the
+    other, which is only correct when every vendor finding is minor. On the real
+    config the buckets summed to 322 against a total of 188, and the two screens
+    that showed the number disagreed with each other.
+    """
+
+    def _report(self, *specs):
+        from studio.health import _blocking, _counts
+
+        findings = [
+            Finding(
+                rule="R1",
+                title="t",
+                detail="d",
+                severity=sev,
+                path="/p",
+                owner=owner,
+                waived=waived,
+            )
+            for sev, owner, waived in specs
+        ]
+        return _counts(findings, _blocking(findings))
+
+    def test_the_buckets_sum_to_the_total(self):
+        c = self._report(
+            (Severity.CRITICAL, Owner.LOCAL, False),
+            (Severity.MINOR, Owner.LOCAL, False),
+            (Severity.MINOR, Owner.VENDOR, False),
+            (Severity.CRITICAL, Owner.VENDOR, False),
+            (Severity.MINOR, Owner.LOCAL, True),
+        )
+        self.assertEqual(
+            c["blocking"] + c["waived"] + c["vendor_owned"] + c["minor"], c["total"]
+        )
+
+    def test_a_vendor_minor_is_counted_once_not_twice(self):
+        """The specific overlap that inflated the totals."""
+        c = self._report((Severity.MINOR, Owner.VENDOR, False))
+        self.assertEqual(c["vendor_owned"], 1)
+        self.assertEqual(c["minor"], 0, "vendor finding also counted as minor")
+
+    def test_minor_means_local_minor(self):
+        """It is displayed as "可選改善" next to "不是你的", so it has to exclude
+        vendor content or the two rows describe the same findings."""
+        c = self._report(
+            (Severity.MINOR, Owner.LOCAL, False),
+            (Severity.MINOR, Owner.VENDOR, False),
+            (Severity.MINOR, Owner.VENDOR, False),
+        )
+        self.assertEqual(c["minor"], 1)
+
+    def test_a_waived_finding_lands_only_in_waived(self):
+        c = self._report((Severity.CRITICAL, Owner.LOCAL, True))
+        self.assertEqual(c["waived"], 1)
+        self.assertEqual(c["blocking"], 0)
+        self.assertEqual(c["minor"], 0)
+
+    def test_a_vendor_critical_does_not_block(self):
+        """Editing vendor files is undone by the next upgrade, so severity there
+        cannot decide the verdict - but it still has to be counted somewhere."""
+        c = self._report((Severity.CRITICAL, Owner.VENDOR, False))
+        self.assertEqual(c["blocking"], 0)
+        self.assertEqual(c["vendor_owned"], 1)
+        self.assertEqual(c["blocking"] + c["waived"] + c["vendor_owned"] + c["minor"], 1)
+
+
+class AgentReferencesAreResolvedNotMatchedAsText(unittest.TestCase):
+    """The same file is written three ways - `~/.claude/agents/x.md`, the expanded
+    absolute path, and `../agents/x.md` relative to the referring file. Comparing
+    spellings reported two of the three as unreferenced, which is the reading that
+    got four live reviewer prompts deleted."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.agents = os.path.join(self._tmp.name, "agents")
+        self.commands = os.path.join(self._tmp.name, "commands")
+        os.makedirs(self.agents)
+        os.makedirs(self.commands)
+        self.agent = os.path.join(self.agents, "security.md")
+        with open(self.agent, "w", encoding="utf-8") as fh:
+            fh.write("# Security\n")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _readers(self, text):
+        from studio.rules.agents import _reference_index
+
+        path = os.path.join(self.commands, "done.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        inv = Inventory()
+        inv.commands = [
+            Command(id="c", name="done", path=path, runtime=Runtime.CLAUDE, lines=1)
+        ]
+        return _reference_index(inv).get(os.path.realpath(self.agent), [])
+
+    def test_a_relative_reference_counts(self):
+        self.assertTrue(self._readers("Run `../agents/security.md`.\n"))
+
+    def test_an_absolute_reference_counts(self):
+        self.assertTrue(self._readers(f"Run `{self.agent}`.\n"))
+
+    def test_a_longer_filename_is_not_a_reference(self):
+        """`security.md.bak` is an orphaned backup, not a reader. Counting it
+        downgraded the very finding that would have got it cleaned up."""
+        self.assertFalse(self._readers(f"Run `{self.agent}.bak`.\n"))
+
+    def test_an_unrelated_file_is_not_a_reference(self):
+        self.assertFalse(self._readers("Run `../agents/quality.md`.\n"))
+
+    def test_a_skill_counts_as_a_reader(self):
+        """Skills read agent prompts too, and were missing from the corpus - so
+        deleting an agent on AG001's advice could break a skill instead."""
+        from studio.rules.agents import _reference_index
+
+        skill_dir = os.path.join(self._tmp.name, "skills", "review")
+        os.makedirs(skill_dir)
+        skill_path = os.path.join(skill_dir, "SKILL.md")
+        with open(skill_path, "w", encoding="utf-8") as fh:
+            fh.write(f"---\nname: review\n---\nRead {self.agent}\n")
+        inv = Inventory()
+        inv.skills = [
+            Skill(
+                id="s",
+                name="review",
+                dir_name="review",
+                path=skill_path,
+                runtime=Runtime.CLAUDE,
+                origin=Origin.LOCAL,
+                description="Use when reviewing.",
+                body_lines=1,
+            )
+        ]
+        self.assertIn(skill_path, _reference_index(inv).get(os.path.realpath(self.agent), []))
+
+    def test_a_file_does_not_reference_itself(self):
+        """Agents are in the corpus so one agent can reference another, which
+        makes a file naming its own path look like its own reader."""
+        from studio.rules.agents import _reference_index
+
+        with open(self.agent, "w", encoding="utf-8") as fh:
+            fh.write(f"I am {self.agent}\n")
+        inv = Inventory()
+        inv.agents = [
+            AgentDef(
+                id="a",
+                name="security",
+                path=self.agent,
+                runtime=Runtime.CLAUDE,
+                lines=1,
+                description="",
+                frontmatter_present=False,
+                declared_name="",
+            )
+        ]
+        self.assertEqual(_reference_index(inv).get(os.path.realpath(self.agent), []), [])
+
+    def test_the_corpus_is_read_once_not_once_per_agent(self):
+        """Asking per agent re-read 1,135 files eleven times - 66 seconds for an
+        answer that does not vary between agents."""
+        from studio.rules import agents as agents_mod
+
+        reads = []
+        real = agents_mod.safeio.read_text if hasattr(agents_mod, "safeio") else None
+        from studio import safeio as safeio_mod
+
+        original = safeio_mod.read_text
+
+        def counting(path, *a, **kw):
+            reads.append(path)
+            return original(path, *a, **kw)
+
+        path = os.path.join(self.commands, "done.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"Read {self.agent}\n")
+        inv = Inventory()
+        inv.commands = [
+            Command(id="c", name="done", path=path, runtime=Runtime.CLAUDE, lines=1)
+        ]
+        inv.agents = [
+            AgentDef(
+                id=f"a{i}",
+                name=f"a{i}",
+                path=self.agent,
+                runtime=Runtime.CLAUDE,
+                lines=1,
+                description="",
+                frontmatter_present=False,
+                declared_name="",
+            )
+            for i in range(5)
+        ]
+        with mock.patch.object(safeio_mod, "read_text", counting):
+            list(agents_mod.ag001(inv, Config(repo_root=".")))
+        self.assertEqual(
+            reads.count(path), 1, f"command file read {reads.count(path)} times"
+        )
+
+
+class TwoInstallsOfOnePluginStayDistinct(unittest.TestCase):
+    """`plugin@marketplace` is the identity everywhere or nowhere.
+
+    Half-applying it - gating on the full key, then collapsing to the bare name -
+    made two enabled installs of one plugin share skill IDs, merged their
+    ownership, and had each report the other's skills in its own count.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cache = os.path.join(self._tmp.name, "plugins", "cache")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _install(self, market, plugin, skills):
+        root = os.path.join(self.cache, market, plugin, "1.0.0")
+        for s in skills:
+            d = os.path.join(root, "skills", s)
+            os.makedirs(d)
+            with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write(f"---\nname: {s}\ndescription: Use when testing.\n---\nbody\n")
+        return root
+
+    def _scan(self, enabled, installs, manifests=None):
+        from studio import scan
+
+        with open(os.path.join(self._tmp.name, "settings.json"), "w", encoding="utf-8") as fh:
+            json.dump({"enabledPlugins": enabled}, fh)
+        os.makedirs(os.path.join(self._tmp.name, "plugins"), exist_ok=True)
+        with open(
+            os.path.join(self._tmp.name, "plugins", "installed_plugins.json"),
+            "w",
+            encoding="utf-8",
+        ) as fh:
+            json.dump(
+                {
+                    "version": 2,
+                    "plugins": {
+                        k: [{"scope": "user", "installPath": v}] for k, v in installs.items()
+                    },
+                },
+                fh,
+            )
+        for market, entries in (manifests or {}).items():
+            d = os.path.join(self._tmp.name, "plugins", "marketplaces", market, ".claude-plugin")
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "marketplace.json"), "w", encoding="utf-8") as fh:
+                json.dump({"plugins": entries}, fh)
+        with mock.patch.object(scan, "CLAUDE_DIR", self._tmp.name):
+            return scan._scan_plugin_skills([])
+
+    def test_two_enabled_installs_do_not_share_skill_ids(self):
+        installs = {
+            "p@m1": self._install("m1", "p", ["review"]),
+            "p@m2": self._install("m2", "p", ["review"]),
+        }
+        skills, _ = self._scan({"p@m1": True, "p@m2": True}, installs)
+        ids = [s.id for s in skills]
+        self.assertEqual(len(ids), len(set(ids)), f"duplicate ids: {ids}")
+
+    def test_each_install_counts_only_its_own_skills(self):
+        installs = {
+            "p@m1": self._install("m1", "p", ["review"]),
+            "p@m2": self._install("m2", "p", ["review"]),
+        }
+        _, per_plugin = self._scan({"p@m1": True, "p@m2": True}, installs)
+        self.assertEqual(per_plugin.get("p@m1"), 1)
+        self.assertEqual(per_plugin.get("p@m2"), 1)
+
+    def test_skill_plugin_is_the_same_key_space_as_plugin_key(self):
+        """The invariant every consumer relies on.
+
+        Test fixtures had been setting `Skill.plugin` to a bare name while the
+        paired `Plugin.key` carried the marketplace, so lookups joining the two
+        passed in tests and returned nothing in production. Pinning it here means
+        the fixture cannot drift from what the scanner actually writes.
+        """
+        installs = {
+            "p@m1": self._install("m1", "p", ["review"]),
+            "p@m2": self._install("m2", "p", ["ship"]),
+        }
+        skills, per_plugin = self._scan({"p@m1": True, "p@m2": True}, installs)
+        self.assertEqual({s.plugin for s in skills}, {"p@m1", "p@m2"})
+        self.assertEqual(set(per_plugin), {"p@m1", "p@m2"})
+
+    def test_a_disabled_installs_manifest_does_not_add_skills(self):
+        """The manifest was keyed by bare name too, so a disabled install's
+        declarations pulled extra directories out of the enabled install's tree
+        and reported them as preloaded."""
+        root = self._install("m1", "p", ["one", "two"])
+        skills, _ = self._scan(
+            {"p@m1": True, "p@m2": False},
+            {"p@m1": root},
+            manifests={
+                "m1": [{"name": "p", "skills": ["skills/one"]}],
+                "m2": [{"name": "p", "skills": ["skills/two"]}],
+            },
+        )
+        self.assertEqual(
+            sorted(s.dir_name for s in skills),
+            ["one"],
+            "a disabled marketplace's declaration leaked in",
+        )
+
+
+class PluginKeySpacesDoNotGetMixed(unittest.TestCase):
+    """Two identities exist on purpose and must not be confused.
+
+    Skills and metadata bytes belong to one *install*, keyed `plugin@marketplace`.
+    Usage and corpus mentions only ever name the plugin, so they are keyed bare -
+    a log line says `plug:skill`, never which marketplace it came from. Looking up
+    one with the other returns zero on every call, and the classifier reads that
+    as "this plugin ships no skills", which silently turns off the cold-plugin
+    analysis instead of failing.
+    """
+
+    def _inv(self, usage_name="plug"):
+        from studio.model import Plugin
+
+        inv = Inventory()
+        inv.plugins = [
+            Plugin(
+                id="plugin:claude:plug@m1",
+                key="plug@m1",
+                marketplace="m1",
+                runtime=Runtime.CLAUDE,
+                enabled=True,
+            )
+        ]
+        inv.skills = [
+            Skill(
+                id="skill:plugin:plug@m1:review",
+                name="review",
+                dir_name="review",
+                path="/p/skills/review/SKILL.md",
+                runtime=Runtime.CLAUDE,
+                origin=Origin.PLUGIN,
+                description="Use when reviewing code.",
+                body_lines=10,
+                plugin="plug@m1",
+            )
+        ]
+        return inv
+
+    def test_the_classifier_sees_the_plugins_own_skills(self):
+        from studio.plugins import classify
+
+        (row,) = classify(self._inv(), {}, corpus="")
+        self.assertEqual(row["skills"], 1, "skills looked up in the wrong key space")
+        self.assertGreater(row["metadata_bytes"], 0)
+
+    def test_an_unused_plugin_with_skills_is_classified_disable(self):
+        """The verdict the whole cold-plugin feature turns on. A zeroed skill
+        count makes it 'keep - ships no skills', which reads as a clean result."""
+        from studio.plugins import classify
+
+        (row,) = classify(self._inv(), {}, corpus="")
+        self.assertEqual(row["verdict"], "disable")
+
+    def test_usage_is_matched_on_the_bare_name(self):
+        """The log cannot say which marketplace a call came from."""
+        from studio.plugins import classify
+
+        (row,) = classify(self._inv(), {"plug": 3}, corpus="")
+        self.assertEqual(row["invocations"], 3)
+        self.assertEqual(row["verdict"], "keep")
+
+    def test_avoidable_bytes_are_not_silently_zero(self):
+        from studio.plugins import avoidable, classify
+
+        by, skills, rows = avoidable(classify(self._inv(), {}, corpus=""))
+        self.assertGreater(by, 0)
+        self.assertEqual(skills, 1)
+        self.assertEqual(len(rows), 1)
+
+    def test_the_graph_links_a_plugin_to_its_skills(self):
+        """Ownership edges vanished, so the map showed every plugin as barren."""
+        from studio.graph import build
+
+        g = build(self._inv(), include_plugin_skills=True)
+        provides = [e for e in g["edges"] if e.get("kind") == "provides"]
+        self.assertEqual(len(provides), 1, "plugin lost ownership of its own skill")
+
+    def test_skill_resolved_usage_is_recorded_under_the_bare_name(self):
+        """An unqualified skill token resolves through the inventory, which knows
+        the full key - recording it there put usage in a key space no consumer
+        reads."""
+        from studio.usage import UsageIndex, plugin_usage
+
+        idx = UsageIndex()
+        idx.tokens = {"review": 4}
+        counts = plugin_usage(idx, self._inv())
+        self.assertEqual(counts.get("plug"), 4)
+        self.assertNotIn("plug@m1", counts)

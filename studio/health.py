@@ -86,6 +86,38 @@ def _blocking(findings: list[Finding]) -> list[Finding]:
     ]
 
 
+def _counts(findings: list[Finding], blocking: list[Finding]) -> dict:
+    """A *partition* of the findings: every finding lands in exactly one bucket.
+
+    These four numbers are read as a breakdown - the dashboard used to derive the
+    local-minor figure as ``minor - vendor_owned``, which is only correct when
+    every vendor finding happens to be minor. They overlapped, summed to more
+    than the total, and the two places that showed them disagreed. Each finding
+    is now assigned once, in priority order, so the buckets add up to ``total``
+    and the UI can display them without arithmetic.
+    """
+    waived = vendor = minor = 0
+    blocking_ids = {id(f) for f in blocking}
+    for f in findings:
+        if f.waived:
+            waived += 1
+        elif id(f) in blocking_ids:
+            pass  # counted via len(blocking)
+        elif f.owner is Owner.VENDOR:
+            vendor += 1
+        else:
+            minor += 1
+    out = {
+        "total": len(findings),
+        "blocking": len(blocking),
+        "waived": waived,
+        "vendor_owned": vendor,
+        "minor": minor,
+    }
+    assert out["blocking"] + waived + vendor + minor == out["total"], out
+    return out
+
+
 def _metrics(inv: Inventory, cfg: Config) -> dict:
     """Descriptive measurements shown alongside the verdict."""
     from .model import Origin
@@ -183,15 +215,7 @@ def run(
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         verdict="PASS" if not blocking else "FAIL",
         findings=findings,
-        counts={
-            "total": len(findings),
-            "blocking": len(blocking),
-            "waived": sum(1 for f in findings if f.waived),
-            "vendor_owned": sum(1 for f in findings if f.owner is Owner.VENDOR and not f.waived),
-            "minor": sum(
-                1 for f in findings if f.severity is Severity.MINOR and not f.waived
-            ),
-        },
+        counts=_counts(findings, blocking),
         by_severity=by_severity,
         by_category=by_category,
         by_rule=dict(sorted(by_rule.items())),

@@ -2,6 +2,7 @@
 
 import { createForceGraph } from '/static/vendor/forcegraph.js';
 import {
+  breakdownRows,
   num,
   shortPath,
   escapeHtml,
@@ -160,9 +161,11 @@ function renderStatus() {
         '所以不算你的問題 —— 能做的是升級、移除，或記錄豁免。',
     );
   }
-  const minorLocal = (c.minor || 0) - (c.vendor_owned || 0);
-  if (minorLocal > 0) {
-    items.push(`<b>${minorLocal} 個 minor</b>：可以改善但不影響運作的建議，例如沒在用的 plugin、殘留備份檔。`);
+  // counts is a partition, so this is read straight off the report. It used to
+  // be derived as minor - vendor_owned, which is only right when every vendor
+  // finding is minor, and the two places that showed it disagreed.
+  if (c.minor) {
+    items.push(`<b>${c.minor} 個 minor</b>：可以改善但不影響運作的建議，例如沒在用的 plugin、殘留備份檔。`);
   }
   if (c.waived) {
     items.push(`<b>${c.waived} 個已豁免</b>：你明確記錄過理由、決定不修的項目。`);
@@ -238,34 +241,9 @@ function renderOverview() {
 
   $('tab-findings-count').textContent = counts.blocking ? `(${counts.blocking})` : '';
 
-  // Explain each number instead of listing it. Ordered by whether it is yours.
-  const minorLocal = (counts.minor || 0) - (counts.vendor_owned || 0);
-  const rows = [
-    {
-      k: '需要你處理',
-      n: counts.blocking || 0,
-      why: '你自己的設定裡，會影響 agent 行為的問題。這個數字是唯一的合格判準。',
-      cls: (counts.blocking || 0) > 0 ? 'critical' : 'ok',
-    },
-    {
-      k: 'vendor（不是你的）',
-      n: counts.vendor_owned || 0,
-      why: 'plugin / 工具組帶進來的。手改會被升級覆蓋，所以不列入判準。',
-      cls: 'vendor',
-    },
-    {
-      k: 'minor（可選改善）',
-      n: minorLocal > 0 ? minorLocal : 0,
-      why: '不影響運作的建議：沒在用的 plugin、殘留備份、reference 檔缺目錄。',
-      cls: 'minor',
-    },
-    {
-      k: '已豁免',
-      n: counts.waived || 0,
-      why: '你記錄過理由、決定不修的。豁免是留在紀錄上的決定，不是把它靜音。',
-      cls: 'ok',
-    },
-  ];
+  // Rows come from render.js so the breakdown can be tested without a browser.
+  const rows = breakdownRows(counts);
+
   table(
     $('tbl-breakdown'),
     [

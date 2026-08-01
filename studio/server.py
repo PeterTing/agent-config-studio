@@ -229,6 +229,18 @@ class Handler(SimpleHTTPRequestHandler):
         query = parse_qs(parsed.query)
         fresh = query.get("fresh", ["0"])[0] not in ("0", "", "false")
 
+        # `fresh=1` means "rescan", on whichever route it appears - summary,
+        # inventory, graph and updates all accept it, and updates additionally
+        # goes to the network. Gating each expensive route by hand left those
+        # four open, so the rule lives here instead: any read that does work is
+        # gated, any read served from cache is not.
+        if fresh and route.startswith("/api/"):
+            refusal = self._from_this_page()
+            if refusal:
+                return self._send(
+                    {"error": refusal, "command": "studio health"}, HTTPStatus.FORBIDDEN
+                )
+
         try:
             if route in ("/", "/index.html"):
                 return self._file("index.html")
@@ -244,17 +256,7 @@ class Handler(SimpleHTTPRequestHandler):
                 cfg = Config.load(self.repo_root)
                 return self._send(graph_mod.build(_inventory(fresh), cfg, include_plugin_skills=expand))
             if route == "/api/health":
-                # A fresh GET runs the same full-history scan as the POST route,
-                # and Host is legitimately 127.0.0.1 for a cross-origin no-CORS
-                # request - so gating only the POST left the expensive path wide
-                # open. Cached reads stay ungated; they cost nothing.
-                if fresh:
-                    refusal = self._from_this_page()
-                    if refusal:
-                        return self._send(
-                            {"error": refusal, "command": "studio health"},
-                            HTTPStatus.FORBIDDEN,
-                        )
+                # `fresh` is gated centrally above, for every route that takes it.
                 return self._send(self._health(fresh))
             if route == "/api/history":
                 return self._send(health.load_history(self.repo_root))
@@ -309,6 +311,11 @@ class Handler(SimpleHTTPRequestHandler):
                     )
                 return self._send(self._fixes())
             if route == "/api/file":
+                # Hands out file contents, so it needs the same gate as every
+                # other content endpoint. It was the only one without it.
+                refusal = self._from_this_page()
+                if refusal:
+                    return self._send({"error": refusal}, HTTPStatus.FORBIDDEN)
                 return self._send(self._file_peek(query.get("path", [""])[0]))
 
             self._send({"error": f"no route {route}"}, HTTPStatus.NOT_FOUND)
@@ -832,18 +839,55 @@ class Handler(SimpleHTTPRequestHandler):
             "scan_errors": inv.scan_errors[:20],
         }
 
+    #: Files that hold credentials rather than configuration. Refused whatever
+    #: the gate says: a config auditor never needs to display a token to do its
+    #: job, and `~/.codex/auth.json` holds a long-lived OAuth refresh token that
+    #: the OS protects at 0600.
+    _CREDENTIAL_NAMES = frozenset(
+        {
+            "auth.json",
+            ".credentials.json",
+            "credentials.json",
+            ".netrc",
+            "id_rsa",
+            "id_ed25519",
+            ".env",
+            ".env.local",
+            ".npmrc",
+            ".pypirc",
+            ".git-credentials",
+        }
+    )
+    _CREDENTIAL_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore")
+
+    @classmethod
+    def _is_credential(cls, full: str) -> bool:
+        base = os.path.basename(full).lower()
+        if base in cls._CREDENTIAL_NAMES or base.startswith(("auth.", ".env.")):
+            return True
+        return base.endswith(cls._CREDENTIAL_SUFFIXES)
+
     def _file_peek(self, path: str) -> dict:
         """Show a config file in the dashboard. Confined to known config roots."""
         if not path:
             return {"error": "path required"}
-        full = os.path.abspath(os.path.expanduser(path))
+        # Resolve symlinks before deciding anything. Both the confinement check
+        # and the credential check look at a path, and `abspath` leaves links
+        # intact - so a file named `notes.md` inside an audited root, pointing at
+        # `~/.codex/auth.json`, passed both and had its target read out. Judge the
+        # file that will actually be opened, and refuse if either spelling of it
+        # looks like a credential.
+        requested = os.path.abspath(os.path.expanduser(path))
+        full = os.path.realpath(requested)
         inv = _inventory(False)
-        allowed = [os.path.abspath(r) for r in inv.roots.values() if r]
-        allowed.append(os.path.abspath(self.repo_root))
+        allowed = [os.path.realpath(r) for r in inv.roots.values() if r]
+        allowed.append(os.path.realpath(self.repo_root))
         if not any(full.startswith(a + os.sep) or full == a for a in allowed):
             return {"error": "path outside the audited config roots"}
         if not os.path.isfile(full):
             return {"error": "not a file"}
+        if self._is_credential(full) or self._is_credential(requested):
+            return {"error": "credential file — not shown. This tool never displays secrets."}
         if os.path.getsize(full) > 512 * 1024:
             return {"error": "file too large to preview"}
         with open(full, encoding="utf-8", errors="replace") as fh:

@@ -161,11 +161,15 @@ def build(inv: Inventory, cfg=None, include_plugin_skills: bool = False) -> dict
 
     # ---- plugin -> skill edges ------------------------------------------- #
     if include_plugin_skills:
+        # Both sides are the full `plugin@marketplace` key. Comparing a bare name
+        # against it matched nothing, so every plugin lost its skills in the graph
+        # and appeared to ship none.
+        by_key = {p.key: p for p in inv.plugins}
         for s in inv.skills:
             if s.origin is Origin.PLUGIN and s.plugin and s.id in nodes:
-                for p in inv.plugins:
-                    if p.key.split("@")[0] == s.plugin:
-                        link(p.id, s.id, "provides")
+                owner = by_key.get(s.plugin)
+                if owner is not None:
+                    link(owner.id, s.id, "provides")
 
     # ---- mirror / generated edges ---------------------------------------- #
     if cfg is not None:

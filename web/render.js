@@ -445,7 +445,46 @@ function legendHtml(kinds, presentEdgeKinds, nodeColors, edgeLabels) {
     </div>`;
 }
 
+/* The overview's four-row breakdown.
+ *
+ * `counts` from the health report is a partition, so each row is read straight
+ * off it. This lived in app.js and derived the minor row as
+ * `minor - vendor_owned`, which is only correct when every vendor finding is
+ * minor; it disagreed with the findings tab on the real config. It sits here so
+ * that arithmetic cannot come back unnoticed.
+ */
+function breakdownRows(counts) {
+  const c = counts || {};
+  return [
+    {
+      k: '需要你處理',
+      n: c.blocking || 0,
+      why: '你自己的設定裡，會影響 agent 行為的問題。這個數字是唯一的合格判準。',
+      cls: (c.blocking || 0) > 0 ? 'critical' : 'ok',
+    },
+    {
+      k: 'vendor（不是你的）',
+      n: c.vendor_owned || 0,
+      why: 'plugin / 工具組帶進來的。手改會被升級覆蓋，所以不列入判準。',
+      cls: 'vendor',
+    },
+    {
+      k: 'minor（可選改善）',
+      n: c.minor || 0,
+      why: '不影響運作的建議：沒在用的 plugin、殘留備份、reference 檔缺目錄。',
+      cls: 'minor',
+    },
+    {
+      k: '已豁免',
+      n: c.waived || 0,
+      why: '你記錄過理由、決定不修的。豁免是留在紀錄上的決定，不是把它靜音。',
+      cls: 'ok',
+    },
+  ];
+}
+
 export {
+  breakdownRows,
   num,
   shortPath,
   escapeHtml,

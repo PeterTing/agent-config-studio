@@ -24,7 +24,6 @@ from . import (
 
 _NAME_RE = re.compile(r"^[a-z0-9-]+$")
 #: Signals that a description says *when* to use the skill, not just what it is.
-#: Signals that a description says *when* to use the skill, not just what it is.
 #: Deliberately generous about phrasing. A narrow pattern reported real triggers
 #: as missing - "Use agent-browser ONLY when...", "Trigger whenever...", "Use for
 #: every TEST task" - and a check that flags correct descriptions gets ignored.
@@ -610,12 +609,19 @@ def sk017(inv: Inventory, cfg: Config):
     is redundant, and choosing which survives is an editorial decision. Pairs
     that are the same skill in two runtimes are left to ``SK016``.
     """
-    # One entry per skill *name*: a skill mirrored into both runtimes would
-    # otherwise report every overlap twice, once per runtime copy.
+    # One entry per skill *name* - a skill mirrored into both runtimes would
+    # otherwise report every overlap twice - remembering every runtime it loads
+    # in. Two skills only compete when they are loaded together: a Claude-only
+    # skill and a Codex-only one never see each other, so pairing them would
+    # report a conflict that cannot happen.
     mine: list = []
+    runtimes: dict[str, set[str]] = {}
     seen_names: set[str] = set()
     for s in sorted(inv.skills, key=lambda s: (s.name, s.runtime.value)):
-        if s.origin is not Origin.LOCAL or not s.description or s.name in seen_names:
+        if s.origin is not Origin.LOCAL or not s.description:
+            continue
+        runtimes.setdefault(s.name, set()).add(s.runtime.value)
+        if s.name in seen_names:
             continue
         seen_names.add(s.name)
         mine.append(s)
@@ -625,6 +631,8 @@ def sk017(inv: Inventory, cfg: Config):
     for a, b in itertools.combinations(mine, 2):
         if a.name == b.name:
             continue  # cross-runtime pair of one skill: SK016's job
+        if not (runtimes.get(a.name, set()) & runtimes.get(b.name, set())):
+            continue  # never loaded together, so they cannot compete
         A, B = bags[id(a)], bags[id(b)]
         if not A or not B:
             continue

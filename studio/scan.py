@@ -214,7 +214,17 @@ def _scan_skill_dir(
     return out
 
 
-def _enabled_plugin_names() -> set[str]:
+def _enabled_plugin_keys() -> set[str]:
+    """Enabled plugins, keyed by the full ``plugin@marketplace`` identifier.
+
+    The marketplace is part of the identity, not decoration. The same plugin name
+    can be installed from two marketplaces and enabled in only one - here
+    ``superpowers@claude-plugins-official`` is off while
+    ``superpowers@superpowers-marketplace`` is on. Keying on the bare name made
+    the disabled install look enabled too, so its skills were counted as
+    preloaded and every one of them produced a finding about a skill that is
+    never loaded.
+    """
     path = os.path.join(CLAUDE_DIR, "settings.json")
     if not os.path.isfile(path):
         return set()
@@ -222,9 +232,7 @@ def _enabled_plugin_names() -> set[str]:
         data = json.loads(_read(path))
     except (OSError, json.JSONDecodeError):
         return set()
-    return {
-        key.split("@")[0] for key, on in (data.get("enabledPlugins") or {}).items() if on
-    }
+    return {key for key, on in (data.get("enabledPlugins") or {}).items() if on}
 
 
 def _installed_plugins(errors: list[str]) -> dict[str, dict]:
@@ -282,13 +290,18 @@ def _skill_dirs_under(root: str) -> list[str]:
 
 
 def _declared_skill_paths(errors: list[str]) -> dict[str, list[str]]:
-    """Map plugin name -> the skill paths its marketplace manifest declares.
+    """Map ``plugin@marketplace`` -> the skill paths that manifest declares.
 
     Paths stay relative because several plugins can share one source tree while
     declaring different subsets of it (``anthropic-agent-skills`` ships
     document-skills, example-skills and claude-api from one directory). Resolving
     them against each plugin's own install path is what keeps the three from each
     claiming all sixteen skills.
+
+    Keyed by marketplace as well as name, because two marketplaces can each ship
+    a plugin called ``superpowers`` declaring different skill sets. Merging them
+    under the bare name let a disabled install's declarations pull directories
+    out of the enabled install's tree and report them as preloaded.
     """
     plugins_root = os.path.join(CLAUDE_DIR, "plugins")
     out: dict[str, list[str]] = {}
@@ -315,7 +328,7 @@ def _declared_skill_paths(errors: list[str]) -> dict[str, list[str]]:
                     continue
                 declared = entry.get("skills")
                 if isinstance(declared, list) and declared:
-                    out.setdefault(entry["name"], []).extend(
+                    out.setdefault(f"{entry['name']}@{market}", []).extend(
                         d for d in declared if isinstance(d, str)
                     )
     return out
@@ -328,17 +341,16 @@ def _scan_plugin_skills(errors: list[str]) -> tuple[list[Skill], dict[str, int]]
     disabled contributes nothing to the startup context. Counting it would
     overstate the metadata budget and point remediation at the wrong plugins.
     """
-    enabled = _enabled_plugin_names()
+    enabled = _enabled_plugin_keys()
     declared = _declared_skill_paths(errors)
     installed = _installed_plugins(errors)
 
     index: dict[str, list[str]] = {}
     for key, rec in installed.items():
-        plugin = key.split("@")[0]
-        if plugin not in enabled:
+        if key not in enabled:
             continue
         root = rec["installPath"]
-        rels = declared.get(plugin)
+        rels = declared.get(key)
         if rels:
             # An explicit declaration is authoritative: use exactly those paths.
             dirs = [
@@ -348,7 +360,10 @@ def _scan_plugin_skills(errors: list[str]) -> tuple[list[Skill], dict[str, int]]
             ]
         else:
             dirs = _skill_dirs_under(root)
-        index.setdefault(plugin, []).extend(dirs)
+        # Keyed by the full identifier: two enabled installs of the same plugin
+        # name are two plugins, and merging them double-counted each one's skills
+        # against the other.
+        index.setdefault(key, []).extend(dirs)
 
     out: list[Skill] = []
     per_plugin: dict[str, int] = {}
@@ -574,7 +589,7 @@ def _scan_plugins(per_plugin_skills: dict[str, int], errors: list[str]) -> list[
     installed = _installed_plugins(errors)
 
     for key, on in sorted(enabled.items()):
-        plugin_name, _, market = key.partition("@")
+        _, _, market = key.partition("@")
         meta = marketplaces.get(market, {}) if isinstance(marketplaces, dict) else {}
         if not isinstance(meta, dict):
             meta = {}
@@ -602,7 +617,10 @@ def _scan_plugins(per_plugin_skills: dict[str, int], errors: list[str]) -> list[
                 commit=str(rec.get("gitCommitSha") or ""),
                 install_path=str(rec.get("installPath") or ""),
                 marketplace_repo=repo,
-                skill_count=per_plugin_skills.get(plugin_name, 0),
+                # Looked up by the full `plugin@marketplace` key, matching how
+                # the skills were counted. A bare-name lookup made two installs
+                # of one plugin each report the other's skills as well.
+                skill_count=per_plugin_skills.get(key, 0),
             )
         )
 

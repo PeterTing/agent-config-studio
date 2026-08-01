@@ -406,13 +406,20 @@ def plugin_usage(idx: UsageIndex, inventory) -> dict[str, int]:
     splitting on underscores, because both plugin and server names contain
     underscores and hyphens (``mcp__plugin_adobe-for-creativity_Adobe_for_...``).
     """
+    # Keyed by *bare* plugin name throughout. That is the only identity the logs
+    # carry: `plug:skill`, `mcp__plugin_plug_server__tool` and an agent type
+    # `plug:coder` all name the plugin without its marketplace, so two installs
+    # of one name are indistinguishable here and are counted together. Skills and
+    # metadata bytes are keyed by the full `plugin@marketplace` install instead -
+    # mixing the two key spaces silently produced zeroes on every lookup.
     counts: dict[str, int] = dict(idx.plugins)
 
     by_name: dict[str, str] = {}
     for s in inventory.skills:
         if s.plugin and s.name:
-            by_name.setdefault(s.name.lower(), s.plugin)
-            by_name.setdefault(s.dir_name.lower(), s.plugin)
+            bare = s.plugin.split("@")[0]
+            by_name.setdefault(s.name.lower(), bare)
+            by_name.setdefault(s.dir_name.lower(), bare)
     for token, n in idx.tokens.items():
         if ":" in token:
             continue

@@ -89,9 +89,14 @@ def classify(
     for p in inv.plugins:
         if not p.enabled or p.runtime.value != runtime:
             continue
+        # Two key spaces, deliberately. Skills and bytes belong to one *install*,
+        # so they are looked up by the full `plugin@marketplace` key. Usage and
+        # corpus mentions only ever name the plugin, so they are looked up bare.
+        # Using the bare name for all four made every count come back zero, and
+        # the classifier then reported unused plugins as "ships no skills".
         name = p.key.split("@")[0]
         hits = usage_counts.get(name, 0)
-        skills = skills_by_plugin.get(name, [])
+        skills = skills_by_plugin.get(p.key, [])
 
         if hits > 0:
             verdict, reason = "keep", f"{hits} recorded invocation(s)"
@@ -115,7 +120,7 @@ def classify(
                 "reason": reason,
                 "invocations": hits,
                 "skills": len(skills),
-                "metadata_bytes": bytes_by_plugin.get(name, 0),
+                "metadata_bytes": bytes_by_plugin.get(p.key, 0),
             }
         )
     rows.sort(key=lambda r: (r["verdict"] != "disable", -r["metadata_bytes"]))
