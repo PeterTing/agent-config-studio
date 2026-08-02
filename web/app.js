@@ -3,6 +3,7 @@
 import { createForceGraph } from '/static/vendor/forcegraph.js';
 import {
   breakdownRows,
+  catalogueSections,
   num,
   shortPath,
   escapeHtml,
@@ -903,13 +904,7 @@ function renderInventory() {
 
   if (cards) {
     $('i-stats').textContent = `${rows.length} 筆`;
-    $('cards-inventory').innerHTML = rows.length
-      ? rows
-          .slice()
-          .sort((a, b) => String(a.name || a.path).localeCompare(String(b.name || b.path)))
-          .map((r) => catalogueCard(kind, r))
-          .join('')
-      : '<span class="muted">沒有符合的項目。</span>';
+    $('cards-inventory').innerHTML = catalogueSections(kind, rows, { expandAll: Boolean(q) });
     return;
   }
 

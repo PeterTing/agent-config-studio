@@ -445,3 +445,25 @@ nav#tabs button:focus-visible { outline-offset: -2px; }
     outline-offset: 2px;
   }
 }
+
+/* Catalogue groups. The summary is the index: it has to stay reachable while
+   you are deep inside a group, or grouping just adds a click to the same
+   42-screen scroll. */
+.cat-group { border-top: 1px solid var(--line); padding: 4px 0 10px; }
+.cat-group:first-of-type { border-top: 0; }
+.cat-group > summary {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+  padding: 10px 2px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.cat-group > summary::-webkit-details-marker { display: none; }
+.cat-group > summary::before { content: '▸'; color: var(--ink-3); }
+.cat-group[open] > summary::before { content: '▾'; }
+.cat-group > summary .muted { font-size: 12px; font-weight: normal; }

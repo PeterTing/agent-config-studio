@@ -231,6 +231,71 @@ function rowActionsHtml(r) {
   return `${peek}<span class="muted">這是${vendor}帶進來的，隔離會被下次升級覆蓋 —— 要移除請${how}</span>`;
 }
 
+/* The catalogue, grouped instead of poured out in one column.
+ *
+ * 222 skills rendered flat is 42 screens of uninterrupted scroll with no way to
+ * tell where your own files end and a plugin's begin - the page could tell you a
+ * skill's trigger and still not let you find it. Grouping by who owns the file
+ * matches the only question a reader actually has here ("is this mine to
+ * change?"), and the group you own opens by default because it is the one you
+ * can act on.
+ */
+const GROUP_ORDER = ['local', 'toolkit', 'plugin', 'orphan-library'];
+const GROUP_LABEL = {
+  local: '你自己寫的',
+  toolkit: '工具組裝的',
+  plugin: 'plugin 帶的',
+  'orphan-library': '載入不到的（放在 agent 讀不到的目錄）',
+  other: '其他',
+};
+const GROUP_NOTE = {
+  local: '你可以直接改，改了就生效。',
+  toolkit: '工具組升級會覆蓋，要改請改工具組那邊。',
+  plugin: 'plugin 升級會覆蓋。要移除請停用該 plugin。',
+  'orphan-library': '這些完全不花錢，也叫不動 —— 它們不在任何 runtime 的載入路徑上。',
+  other: '',
+};
+
+function catalogueSections(kind, rows, { expandAll = false } = {}) {
+  if (!rows || !rows.length) return '<span class="muted">沒有符合的項目。</span>';
+
+  const groups = new Map();
+  for (const r of rows) {
+    const key = GROUP_ORDER.includes(r.origin) ? r.origin : 'other';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  // One group is not a grouping - skip the chrome and render the list.
+  if (groups.size < 2) {
+    return sortRows(rows)
+      .map((r) => catalogueCard(kind, r))
+      .join('');
+  }
+
+  const order = [...GROUP_ORDER, 'other'].filter((k) => groups.has(k));
+  return order
+    .map((key) => {
+      const items = sortRows(groups.get(key));
+      // Closed by default: with 222 items the first screen should be an index
+      // of what exists, not the first 92 cards of one group with the other two
+      // headers 17 screens down. A search is the opposite case - the reader has
+      // already narrowed it and wants to see what matched, so everything opens.
+      const open = expandAll ? ' open' : '';
+      const note = GROUP_NOTE[key] ? `<span class="muted">${escapeHtml(GROUP_NOTE[key])}</span>` : '';
+      return `<details class="cat-group"${open}>
+        <summary><b>${escapeHtml(GROUP_LABEL[key])}</b> <span class="tag">${items.length}</span> ${note}</summary>
+        ${items.map((r) => catalogueCard(kind, r)).join('')}
+      </details>`;
+    })
+    .join('');
+}
+
+function sortRows(rows) {
+  return rows
+    .slice()
+    .sort((a, b) => String(a.name || a.path).localeCompare(String(b.name || b.path)));
+}
+
 function catalogueCard(kind, r) {
   const name = r.name || r.dir_name || shortPath(r.path);
   const src = r.origin ? `<span class="tag">${escapeHtml(r.origin)}</span>` : '';
@@ -529,6 +594,7 @@ function breakdownRows(counts) {
 
 export {
   breakdownRows,
+  catalogueSections,
   rowActionsHtml,
   num,
   shortPath,

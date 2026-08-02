@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import {
+  catalogueSections,
   rowActionsHtml,
   breakdownRows,
   metaBreakdownHtml,
@@ -617,6 +618,76 @@ test('the trend chart escapes counts it did not compute', () => {
     { generated_at: '2026-08-01', verdict: 'FAIL', counts: { blocking: '"><img src=x onerror=alert(1)>' } },
   ]);
   assert.ok(!chart.includes('<img'), `markup survived in chart: ${chart}`);
+});
+
+/* ---------------- catalogue grouping ---------------- */
+
+const ROW = (name, origin) => ({
+  name,
+  origin,
+  runtime: 'claude',
+  body_lines: 10,
+  path: `/p/${name}/SKILL.md`,
+  description: 'Does X. Use when Y.',
+});
+
+test('the catalogue separates what you own from what an upgrade overwrites', () => {
+  // 222 cards in one column is 42 screens with no way to see where your own
+  // files end and a plugin's begin.
+  const html = catalogueSections('skills', [ROW('mine', 'local'), ROW('theirs', 'plugin')]);
+  assert.ok(html.includes('你自己寫的'), 'no owner grouping');
+  assert.ok(html.includes('plugin 帶的'));
+});
+
+const openState = (html) => {
+  // Read the actual <details> tag for each group rather than nearby text.
+  const out = {};
+  for (const m of html.matchAll(/<details class="cat-group"( open)?>\s*<summary><b>([^<]+)</g)) {
+    out[m[2]] = Boolean(m[1]);
+  }
+  return out;
+};
+
+test('the first screen is an index, not the first 92 cards of one group', () => {
+  const state = openState(catalogueSections('skills', [ROW('mine', 'local'), ROW('theirs', 'plugin')]));
+  assert.deepEqual(Object.values(state), [false, false], 'a group is expanded by default');
+  assert.equal(Object.keys(state).length, 2, 'group headers missing');
+});
+
+test('a search expands everything, because the reader already narrowed it', () => {
+  const state = openState(
+    catalogueSections('skills', [ROW('mine', 'local'), ROW('theirs', 'plugin')], {
+      expandAll: true,
+    }),
+  );
+  assert.deepEqual(Object.values(state), [true, true], 'search results stay collapsed');
+});
+
+test('each group states how many are in it', () => {
+  const html = catalogueSections('skills', [
+    ROW('a', 'local'),
+    ROW('b', 'local'),
+    ROW('c', 'plugin'),
+  ]);
+  assert.match(html, /你自己寫的<\/b> <span class="tag">2<\/span>/);
+  assert.match(html, /plugin 帶的<\/b> <span class="tag">1<\/span>/);
+});
+
+test('no card is dropped by the grouping', () => {
+  const rows = ['local', 'plugin', 'toolkit', 'orphan-library', undefined].map((o, i) =>
+    ROW(`s${i}`, o),
+  );
+  const html = catalogueSections('skills', rows);
+  for (const r of rows) assert.ok(html.includes(r.name), `${r.name} vanished`);
+});
+
+test('a single-owner list is not wrapped in pointless chrome', () => {
+  const html = catalogueSections('skills', [ROW('a', 'local'), ROW('b', 'local')]);
+  assert.ok(!html.includes('cat-group'), 'added a group header for one group');
+});
+
+test('an empty result says so rather than rendering nothing', () => {
+  assert.ok(catalogueSections('skills', []).includes('沒有符合的項目'));
 });
 
 /* ---------------- report ---------------- */
