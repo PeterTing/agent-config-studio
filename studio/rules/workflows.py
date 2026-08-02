@@ -85,6 +85,20 @@ def wf002(inv: Inventory, cfg: Config):
             )
 
 
+def _ranges(numbers: list[int]) -> str:
+    """Render line numbers as ranges: 12-18, 40, 55-57."""
+    out: list[str] = []
+    start = prev = numbers[0]
+    for n in numbers[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        out.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = n
+    out.append(str(start) if start == prev else f"{start}-{prev}")
+    return ", ".join(out)
+
+
 @rule(
     "WF003",
     "Workflow duplicates the content of a skill it also invokes",
@@ -96,22 +110,37 @@ def wf003(inv: Inventory, cfg: Config):
     local = {s.name: s for s in inv.skills if s.origin is Origin.LOCAL and s.name}
     for wf in inv.workflows:
         text = _read(wf.path)
-        wf_keys = {_norm(ln) for ln in text.split("\n") if len(_norm(ln)) >= 16}
-        if not wf_keys:
+        # Line numbers as well as keys: "16 lines are duplicated" is not something
+        # anyone can act on without being told which sixteen, and the reader has
+        # to find them by eye in a 353-line file.
+        wf_lines: dict[str, int] = {}
+        for i, ln in enumerate(text.split("\n"), start=1):
+            key = _norm(ln)
+            if len(key) >= 16:
+                wf_lines.setdefault(key, i)
+        if not wf_lines:
             continue
         for name, s in local.items():
             if name not in text:
                 continue
             skill_keys = {_norm(ln) for ln in _read(s.path).split("\n") if len(_norm(ln)) >= 16}
-            overlap = wf_keys & skill_keys
+            overlap = set(wf_lines) & skill_keys
             if len(overlap) < 4:
                 continue
+            numbers = sorted(wf_lines[k] for k in overlap)
             yield make(
                 REG["WF003"],
                 f"{len(overlap)} lines are duplicated from the {name!r} skill, which "
-                "this workflow already tells the agent to read.",
+                f"this workflow already tells the agent to read (lines "
+                f"{_ranges(numbers)}).",
                 path=wf.path,
-                evidence={"skill": name, "duplicate_line_count": len(overlap)},
+                line=numbers[0],
+                evidence={
+                    "skill": name,
+                    "duplicate_line_count": len(overlap),
+                    "duplicate_lines": numbers,
+                    "skill_path": s.path,
+                },
                 remedy="Keep the pointer, drop the copied body.",
             )
 

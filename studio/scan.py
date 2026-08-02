@@ -409,6 +409,29 @@ def _scan_plugin_skills(errors: list[str]) -> tuple[list[Skill], dict[str, int]]
     return out, per_plugin
 
 
+#: Filenames that only appear when content is redistributed under someone
+#: else's terms. Nobody ships a licence with a skill they wrote for their own
+#: machine.
+_REDISTRIBUTION_MARKERS = ("license", "licence", "notice")
+
+
+def _redistributed(skill_path: str) -> bool:
+    """Whether this skill is third-party content copied into a local directory.
+
+    Living under ``~/.claude/skills`` was taken to mean "you wrote this", but 38
+    of the 92 skills there arrived from OpenAI, Figma and Notion - each carrying
+    its own licence file. Counting them as the user's own overstated what they
+    had authored, let the editor offer to change files that the next upgrade
+    overwrites, and made their findings block a verdict the user could not act
+    on.
+    """
+    try:
+        entries = os.listdir(os.path.dirname(skill_path))
+    except OSError:
+        return False
+    return any(e.lower().startswith(_REDISTRIBUTION_MARKERS) for e in entries)
+
+
 def _scan_orphan_library(errors: list[str]) -> list[Skill]:
     root = os.path.join(AGENT_LIB_DIR, "skills")
     return _scan_skill_dir(root, Runtime.UNKNOWN, Origin.ORPHAN_LIBRARY, None, errors)
@@ -564,6 +587,33 @@ def _scan_hooks(errors: list[str]) -> list[Hook]:
     return out
 
 
+def _plugin_contributes(root: str) -> set[str]:
+    """What an install actually ships, read from its directory.
+
+    Only ``skill_count`` was recorded, so a plugin that ships nothing but hooks
+    looked identical to one that ships nothing at all - and both looked "unused",
+    because hook firing is never written to the usage index.
+    """
+    out: set[str] = set()
+    if not root or not os.path.isdir(root):
+        return out
+    for sub, label in (
+        ("skills", "skills"),
+        ("commands", "commands"),
+        ("agents", "agents"),
+        ("hooks", "hooks"),
+    ):
+        d = os.path.join(root, sub)
+        try:
+            if os.path.isdir(d) and any(os.scandir(d)):
+                out.add(label)
+        except OSError:
+            continue
+    if os.path.isfile(os.path.join(root, ".mcp.json")):
+        out.add("mcp")
+    return out
+
+
 def _scan_plugins(per_plugin_skills: dict[str, int], errors: list[str]) -> list[Plugin]:
     out: list[Plugin] = []
 
@@ -605,6 +655,7 @@ def _scan_plugins(per_plugin_skills: dict[str, int], errors: list[str]) -> list[
         rec = installed.get(key) or {}
         out.append(
             Plugin(
+                contributes=_plugin_contributes(str(rec.get("installPath") or "")),
                 id=f"plugin:claude:{key}",
                 key=key,
                 marketplace=market,
@@ -692,7 +743,7 @@ def scan() -> Inventory:
     )
     owned = toolkits_mod.managed_paths(kits)
     for s in inv.skills:
-        if s.origin is Origin.LOCAL and s.path in owned:
+        if s.origin is Origin.LOCAL and (s.path in owned or _redistributed(s.path)):
             s.origin = Origin.TOOLKIT
     inv.toolkits = [k.to_dict() for k in kits]
 

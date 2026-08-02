@@ -30,6 +30,9 @@ class HealthReport:
     by_category: dict[str, int] = field(default_factory=dict)
     by_rule: dict[str, int] = field(default_factory=dict)
     inventory_counts: dict[str, int] = field(default_factory=dict)
+    #: Vendor findings grouped by the source that would have to change to clear
+    #: them. Per-finding they are not decisions; per-source they are.
+    vendor_by_source: list[dict] = field(default_factory=list)
     rules_run: int = 0
     usage: dict = field(default_factory=dict)
     updates: dict = field(default_factory=dict)
@@ -86,6 +89,61 @@ def _blocking(findings: list[Finding]) -> list[Finding]:
     ]
 
 
+def _vendor_by_source(findings: list[Finding], inv: Inventory) -> list[dict]:
+    """Group vendor findings by the thing that would have to change to clear them.
+
+    133 line items about third-party content are not 133 decisions. Editing any
+    of those files is undone by the next upgrade, so the only lever a reader has
+    is per *source*: keep this plugin, keep this skill, or don't. Listing them
+    individually buried that, and the number read as a backlog when it is really
+    a description of what other people shipped.
+    """
+    from . import toolkits as toolkits_mod
+
+    by_path = {os.path.realpath(s.path): s for s in inv.skills}
+    # A toolkit that installs 50 skills is one decision, not 50. Grouping those
+    # by skill name produced 64 "sources" of which most were gstack, which is
+    # the same noise in a different shape.
+    # A toolkit installs its skills beside itself in the skills directory
+    # (skills/mykit/ is the repo, skills/qa/SKILL.md is what loads), so the
+    # directory holding a skill's own folder is the directory to search.
+    kits = toolkits_mod.discover(
+        sorted({os.path.dirname(os.path.dirname(p)) for p in by_path})
+    )
+    owner_of: dict[str, str] = {}
+    for kit in kits:
+        for managed in toolkits_mod.managed_paths([kit]):
+            owner_of[os.path.realpath(managed)] = kit.name
+    groups: dict[tuple[str, str], dict] = {}
+    for f in findings:
+        if f.owner is not Owner.VENDOR or f.waived:
+            continue
+        skill = by_path.get(os.path.realpath(f.path)) if f.path else None
+        real = os.path.realpath(f.path) if f.path else ""
+        if skill is not None and skill.plugin:
+            kind, name, key = "plugin", skill.plugin, skill.plugin
+        elif real in owner_of:
+            kind, name, key = "toolkit", owner_of[real], owner_of[real]
+        elif skill is not None:
+            # Independently removable: one directory, one decision. Grouped by
+            # directory rather than by name, because two unrelated skills can
+            # share a name and merging them would report one decision where
+            # there are two.
+            kind, name, key = "skill", skill.name, os.path.dirname(real)
+        else:
+            name = os.path.basename(os.path.dirname(f.path or "")) or "?"
+            kind, key = "other", os.path.dirname(real) or name
+        g = groups.setdefault(
+            (kind, key), {"kind": kind, "name": name, "findings": 0, "rules": {}}
+        )
+        g["findings"] += 1
+        g["rules"][f.rule] = g["rules"].get(f.rule, 0) + 1
+    out = sorted(groups.values(), key=lambda g: (-g["findings"], g["name"]))
+    for g in out:
+        g["rules"] = dict(sorted(g["rules"].items()))
+    return out
+
+
 def _counts(findings: list[Finding], blocking: list[Finding]) -> dict:
     """A *partition* of the findings: every finding lands in exactly one bucket.
 
@@ -126,8 +184,8 @@ def _metrics(inv: Inventory, cfg: Config) -> dict:
     by_bucket: dict[str, dict] = {}
     total = 0
     # Each runtime preloads only what it can load, so a single combined figure is
-    # a number no session ever pays. Plugins and toolkits install under
-    # ~/.claude, so they are Claude's cost alone.
+    # a number no session ever pays. Attribution follows the directory the skill
+    # was scanned from, which is the only thing that decides who loads it.
     per_runtime: dict[str, dict] = {
         "claude": {"skills": 0, "bytes": 0},
         "codex": {"skills": 0, "bytes": 0},
@@ -142,7 +200,12 @@ def _metrics(inv: Inventory, cfg: Config) -> dict:
         b["skills"] += 1
         b["bytes"] += n
 
-        loads_in = "claude" if s.origin is not Origin.LOCAL else s.runtime.value
+        # Where the file lives is where it loads. Plugins really are Claude-only
+        # and the scanner already records them that way, so deriving this from
+        # origin instead added nothing and got the 36 toolkit skills under
+        # ~/.codex/skills wrong - charging Codex's cost to Claude and moving
+        # ~3,000 tokens to the wrong side of the headline figure.
+        loads_in = s.runtime.value
         if loads_in in per_runtime:
             per_runtime[loads_in]["skills"] += 1
             per_runtime[loads_in]["bytes"] += n
@@ -216,6 +279,7 @@ def run(
         verdict="PASS" if not blocking else "FAIL",
         findings=findings,
         counts=_counts(findings, blocking),
+        vendor_by_source=_vendor_by_source(findings, inv),
         by_severity=by_severity,
         by_category=by_category,
         by_rule=dict(sorted(by_rule.items())),

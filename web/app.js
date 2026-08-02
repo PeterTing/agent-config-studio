@@ -3,6 +3,7 @@
 import { createForceGraph } from '/static/vendor/forcegraph.js';
 import {
   breakdownRows,
+  vendorSourcesHtml,
   catalogueSections,
   num,
   shortPath,
@@ -254,6 +255,8 @@ function renderOverview() {
     ],
     rows,
   );
+
+  $('vendor-sources').innerHTML = vendorSourcesHtml(h.vendor_by_source);
 
   $('meta-breakdown').innerHTML = metaBreakdownHtml(
     (h.metrics || {}).preloaded_skill_metadata,

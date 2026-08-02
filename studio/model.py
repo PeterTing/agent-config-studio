@@ -146,6 +146,11 @@ class Plugin:
     #: "owner/name" of the marketplace repository, when it is a GitHub source.
     marketplace_repo: str = ""
     skill_count: int = 0
+    #: What the install actually contributes, e.g. {"skills", "hooks", "mcp"}.
+    #: Needed because "zero recorded usage" means different things for different
+    #: shapes: a hook never appears in the usage index at all, so a hook-only
+    #: plugin is always at zero and can never be judged unused from usage.
+    contributes: set[str] = field(default_factory=set)
     #: Filled in by updates.py.
     remote_revision: str = ""
     update_available: bool | None = None
@@ -237,6 +242,16 @@ class Inventory:
 def _enc(obj):
     if isinstance(obj, Enum):
         return obj.value
+    if isinstance(obj, (set, frozenset)):
+        # Sorted, so the same inventory always serialises identically - the
+        # output is diffed and cached, and set iteration order is not stable
+        # across runs. Adding one set-valued field took /api/inventory down with
+        # a 500 and, because every panel waits on that call, the whole page with
+        # it.
+        # Keyed by str so a set holding more than one type still sorts. Plain
+        # sorted() raises on {1, "1"}, which would take the whole response down
+        # for a field nobody was looking at.
+        return sorted(obj, key=str)
     raise TypeError(f"not JSON serialisable: {type(obj)!r}")
 
 

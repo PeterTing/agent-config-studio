@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import {
+  vendorSourcesHtml,
   catalogueSections,
   rowActionsHtml,
   breakdownRows,
@@ -688,6 +689,44 @@ test('a single-owner list is not wrapped in pointless chrome', () => {
 
 test('an empty result says so rather than rendering nothing', () => {
   assert.ok(catalogueSections('skills', []).includes('沒有符合的項目'));
+});
+
+/* ---------------- vendor sources ---------------- */
+
+const SOURCES = [
+  { kind: 'toolkit', name: 'gstack', findings: 109, rules: { SK005: 57, SK007: 52 } },
+  { kind: 'plugin', name: 'vercel@claude-plugins-official', findings: 6, rules: { SK005: 3, SK007: 3 } },
+];
+
+test('vendor findings are shown as sources, not as a list of files', () => {
+  // 133 line items about content an upgrade overwrites is not 133 decisions.
+  const html = vendorSourcesHtml(SOURCES);
+  assert.ok(html.includes('gstack'));
+  assert.ok(html.includes('109'));
+  assert.ok(html.includes('115'), 'total across sources missing');
+});
+
+test('each source says what to do about it', () => {
+  const html = vendorSourcesHtml(SOURCES);
+  assert.ok(html.includes('停用'), `no action for a plugin: ${html}`);
+  assert.ok(html.includes('工具組'));
+});
+
+test('the rules behind each source are named', () => {
+  const html = vendorSourcesHtml(SOURCES);
+  assert.ok(html.includes('SK005') && html.includes('SK007'));
+});
+
+test('a source name cannot inject markup', () => {
+  const html = vendorSourcesHtml([
+    { kind: 'plugin', name: '<img src=x onerror=alert(1)>', findings: 1, rules: {} },
+  ]);
+  assert.ok(!html.includes('<img'));
+});
+
+test('no vendor findings says so plainly', () => {
+  assert.ok(vendorSourcesHtml([]).includes('沒有 vendor'));
+  assert.ok(vendorSourcesHtml(undefined).includes('沒有 vendor'));
 });
 
 /* ---------------- report ---------------- */

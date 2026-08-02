@@ -266,11 +266,20 @@ def sk008(inv: Inventory, cfg: Config):
             # link, not added depth. The documented hazard is a forward chain
             # (SKILL.md -> a.md -> b.md), where the last hop gets partially read.
             ref_dir = os.path.dirname(ref)
+            # Everything SKILL.md already points at directly. A cross-reference
+            # to one of those adds no depth: the agent has the file either way,
+            # because the top level put it there. Only a link to something
+            # *reachable solely through this file* extends the chain.
+            # Resolved, so an alias and its target are recognised as the same
+            # file. Comparing spellings reported a reference as nested when
+            # SKILL.md already linked it under another name.
+            direct = {os.path.realpath(r) for r in s.refs}
             deeper = []
             for m in re.findall(r"\[[^\]]*\]\(([^)#\s]+\.md)\)", nested):
                 if m.startswith(("http://", "https://")):
                     continue
-                if os.path.normpath(os.path.join(ref_dir, m)) == s.path:
+                target = os.path.realpath(os.path.join(ref_dir, m))
+                if target == os.path.realpath(s.path) or target in direct:
                     continue
                 deeper.append(m)
             if deeper:
@@ -588,6 +597,17 @@ def _overlap_bag(s) -> set[str]:
     return {w for w in words if w not in _OVERLAP_STOPWORDS}
 
 
+def _names_the_other(a, b) -> bool:
+    """Whether ``a``'s description points the reader at ``b`` by name.
+
+    Matched on word boundaries. A plain substring test let a skill called ``doc``
+    be "named" by any description containing ``documentation``, which silently
+    exempted pairs that really were competing - the opposite of what this rule
+    is for.
+    """
+    return re.search(rf"(?<![\w-]){re.escape(b.name.lower())}(?![\w-])", a.description.lower()) is not None
+
+
 @rule(
     "SK017",
     "Two skills describe overlapping jobs and compete for the same trigger",
@@ -635,6 +655,13 @@ def sk017(inv: Inventory, cfg: Config):
             continue  # never loaded together, so they cannot compete
         A, B = bags[id(a)], bags[id(b)]
         if not A or not B:
+            continue
+        # An explicit pointer to the other skill *is* the fix this rule asks for:
+        # the model is told which one to prefer, so the vocabulary they share is
+        # no longer ambiguous evidence. Naming the sibling also adds its name to
+        # both bags, so without this the recommended remedy scored worse than
+        # doing nothing.
+        if _names_the_other(a, b) or _names_the_other(b, a):
             continue
         score = len(A & B) / len(A | B)
         if score < OVERLAP_THRESHOLD:

@@ -132,6 +132,15 @@ def cb002(inv: Inventory, cfg: Config):
         hits = cfg.plugin_usage.get(plugin_name, 0)
         if hits > 0:
             continue
+        # Hook firing is never written to the usage index - only skills, commands,
+        # agents and MCP tools are. A plugin that ships nothing but hooks is
+        # therefore at zero invocations no matter how often it runs, so "unused"
+        # is not a claim this evidence can support. It was reported anyway, and
+        # the remedy was to disable it: three working hook plugins were one click
+        # from being switched off on evidence that could never have said otherwise.
+        observable = p.contributes & {"skills", "commands", "agents", "mcp"}
+        if p.contributes and not observable:
+            continue
         yield make(
             REG["CB002"],
             f"{p.key} is enabled and contributes {p.skill_count} skill(s), but the "
@@ -142,6 +151,7 @@ def cb002(inv: Inventory, cfg: Config):
                 "runtime": p.runtime.value,
                 "skill_count": p.skill_count,
                 "recorded_invocations": 0,
+                "contributes": sorted(p.contributes),
             },
             remedy=f"Disable {p.key} unless you need it; re-enabling is one setting flip.",
         )
@@ -172,6 +182,29 @@ def cb003(inv: Inventory, cfg: Config):
     )
 
 
+#: How far behind its principal a backup may fall and still count as live.
+#: Wide on purpose: the question is "does something still maintain this", and a
+#: tool that rewrites its backup once a week is still maintaining it.
+_LIVE_BACKUP_WINDOW_S = 14 * 24 * 3600
+
+
+def _principal_of(path: str) -> str | None:
+    """The file a backup is a backup *of*, if that file exists."""
+    for suffix in (".bak", ".backup", ".old", ".orig", ".save"):
+        if path.lower().endswith(suffix):
+            candidate = path[: -len(suffix)]
+            return candidate if os.path.isfile(candidate) else None
+    return None
+
+
+def _is_live_backup(path: str, principal: str) -> bool:
+    """Whether something still maintains this backup alongside its principal."""
+    try:
+        return abs(os.path.getmtime(path) - os.path.getmtime(principal)) <= _LIVE_BACKUP_WINDOW_S
+    except OSError:
+        return False
+
+
 @rule(
     "CB004",
     "Backup or stray file left inside a live config directory",
@@ -196,6 +229,15 @@ def cb004(inv: Inventory, cfg: Config):
                 if not any(m in low for m in _STRAY_MARKERS):
                     continue
                 full = os.path.join(base, entry)
+                # A backup the owning tool still maintains is not a leftover.
+                # `~/.codex/.codex-global-state.json.bak` was quarantined and
+                # Codex rewrote it seven minutes later, so the finding could
+                # never be cleared and acting on it fought the tool that owns
+                # the file. A live backup tracks its principal; a stray one is
+                # left behind when the principal moves on.
+                principal = _principal_of(full)
+                if principal and _is_live_backup(full, principal):
+                    continue
                 yield make(
                     REG["CB004"],
                     f"{entry} sits inside the live {label} config tree. It is not loaded, "

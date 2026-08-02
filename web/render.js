@@ -592,8 +592,46 @@ function breakdownRows(counts) {
   ];
 }
 
+/* Vendor findings, as the decisions they actually are.
+ *
+ * 133 line items about content an upgrade overwrites is not a backlog of 133
+ * things to do - editing any of those files is undone on the next upgrade, so
+ * the only lever is per source: keep this plugin, keep this toolkit, or don't.
+ * Shown grouped, with the rules each source accounts for, because "gstack: 109"
+ * is a decision and "SK005 x 57" spread over 57 rows is not.
+ */
+function vendorSourcesHtml(sources) {
+  const rows = sources || [];
+  if (!rows.length) return '<span class="muted">沒有 vendor 項目。</span>';
+  const total = rows.reduce((a, r) => a + (r.findings || 0), 0);
+  const KIND = { plugin: 'plugin', toolkit: '工具組', skill: '單一 skill', other: '其他' };
+  const HOW = {
+    plugin: '到「套件與更新」分頁停用它',
+    toolkit: '移除這個工具組，或接受它帶的內容',
+    skill: '刪掉這個 skill 目錄',
+    other: '',
+  };
+  return `<p class="sub">這 ${escapeHtml(total)} 項全都在別人維護的檔案裡，改了會被下次升級覆蓋。
+    能做的決定是「這個來源還要不要留」，所以按來源列出來：</p>
+    <table class="tbl"><thead><tr><th>來源</th><th class="num">項目</th><th>問題</th><th>要處理的話</th></tr></thead><tbody>
+    ${rows
+      .map(
+        (r) => `<tr>
+          <td><span class="tag vendor">${escapeHtml(KIND[r.kind] || r.kind)}</span> <code class="mono">${escapeHtml(r.name)}</code></td>
+          <td class="num">${num(r.findings)}</td>
+          <td>${Object.entries(r.rules || {})
+            .map(([code, n]) => `${escapeHtml(code)} ×${escapeHtml(n)}`)
+            .join('、')}</td>
+          <td><span class="detail-text">${escapeHtml(HOW[r.kind] || '')}</span></td>
+        </tr>`,
+      )
+      .join('')}
+    </tbody></table>`;
+}
+
 export {
   breakdownRows,
+  vendorSourcesHtml,
   catalogueSections,
   rowActionsHtml,
   num,

@@ -5471,6 +5471,132 @@ class EveryRuleIsProvenToFire(unittest.TestCase):
         )
         self.assertEqual(self._run(sk010, self._inv(skills=[s])), [])
 
+    def test_cb003_fires_when_an_unreferenced_library_is_on_disk(self):
+        """Costs nothing today; the finding is about what happens when a harness
+        starts reading ~/.agent/skills.
+
+        Like SK011, this rule's only coverage came from a directory that
+        happened to exist on the author's machine - moving it silently uncovered
+        the rule, which is what NoRuleShipsUnproven exists to catch.
+        """
+        from studio.rules.context import cb003
+
+        orphan = Skill(
+            id="s",
+            name="stray",
+            dir_name="stray",
+            path="/lib/skills/stray/SKILL.md",
+            runtime=Runtime.UNKNOWN,
+            origin=Origin.ORPHAN_LIBRARY,
+            description="Does X. Use when Y.",
+            body_lines=1,
+        )
+        inv = self._inv(skills=[orphan])
+        inv.roots = {"agent_library": "/lib"}
+        (found,) = self._run(cb003, inv)
+        self.assertEqual(found.evidence["skill_count"], 1)
+
+    def test_cb003_is_silent_when_the_library_is_gone(self):
+        from studio.rules.context import cb003
+
+        inv = self._inv(skills=[])
+        inv.roots = {"agent_library": "/lib"}
+        self.assertEqual(self._run(cb003, inv), [])
+
+    def test_sk008_fires_on_a_reference_that_extends_the_chain(self):
+        """The documented hazard: SKILL.md -> a.md -> b.md, where the last hop
+        gets partially read."""
+        from studio.rules.skills import sk008
+
+        d = os.path.join(self.tmp, self._slot(), "skills", "thing")
+        os.makedirs(d)
+        with open(os.path.join(d, "deep.md"), "w", encoding="utf-8") as fh:
+            fh.write("detail\n")
+        with open(os.path.join(d, "a.md"), "w", encoding="utf-8") as fh:
+            fh.write("See [deep](deep.md).\n")
+        path = os.path.join(d, "SKILL.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("---\nname: thing\ndescription: Does X. Use when Y.\n---\n[a](a.md)\n")
+        skill = Skill(
+            id="s",
+            name="thing",
+            dir_name="thing",
+            path=path,
+            runtime=Runtime.CLAUDE,
+            origin=Origin.LOCAL,
+            description="Does X. Use when Y.",
+            body_lines=1,
+            refs=[os.path.join(d, "a.md")],
+        )
+        self.assertEqual(len(self._run(sk008, self._inv(skills=[skill]))), 1)
+
+    def test_sk008_ignores_a_cross_reference_to_an_already_direct_file(self):
+        """SKILL.md links both files itself, so the pointer between them adds no
+        depth - the agent has the target either way. Reporting it asked for a
+        change that was already made."""
+        from studio.rules.skills import sk008
+
+        d = os.path.join(self.tmp, self._slot(), "skills", "thing")
+        os.makedirs(d)
+        with open(os.path.join(d, "b.md"), "w", encoding="utf-8") as fh:
+            fh.write("detail\n")
+        with open(os.path.join(d, "a.md"), "w", encoding="utf-8") as fh:
+            fh.write("See also [b](b.md).\n")
+        path = os.path.join(d, "SKILL.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "---\nname: thing\ndescription: Does X. Use when Y.\n---\n[a](a.md) [b](b.md)\n"
+            )
+        skill = Skill(
+            id="s",
+            name="thing",
+            dir_name="thing",
+            path=path,
+            runtime=Runtime.CLAUDE,
+            origin=Origin.LOCAL,
+            description="Does X. Use when Y.",
+            body_lines=1,
+            refs=[os.path.join(d, "a.md"), os.path.join(d, "b.md")],
+        )
+        self.assertEqual(self._run(sk008, self._inv(skills=[skill])), [])
+
+    def test_sk011_fires_on_a_date_gated_instruction(self):
+        """These read as true and become false without anything changing.
+
+        This rule's only coverage used to be a real file on the author's own
+        machine - fixing that file silently uncovered the rule, which is exactly
+        what NoRuleShipsUnproven is for.
+        """
+        from studio.rules.skills import sk011
+
+        bad = self._skill(
+            "---\nname: thing\ndescription: Does X. Use when Y.\n---\n"
+            "As of 2026-06-22, read the token from the Keychain.\n"
+        )
+        good = self._skill(
+            "---\nname: thing\ndescription: Does X. Use when Y.\n---\n"
+            "Read the token from the Keychain.\n"
+        )
+        self.assertEqual(len(self._run(sk011, self._inv(skills=[bad]))), 1)
+        self.assertEqual(self._run(sk011, self._inv(skills=[good])), [])
+
+    def test_sk011_catches_the_other_date_shapes_it_claims_to(self):
+        """The message says "date-gated instructions", so all the forms the
+        pattern lists have to actually match."""
+        from studio.rules.skills import sk011
+
+        for phrase in (
+            "Before March 2026 use the old endpoint.",
+            "Until 2027 keep the shim.",
+            "After Q3 2026 this changes.",
+            "Prior to 2026-01 the flag was required.",
+        ):
+            with self.subTest(phrase=phrase):
+                s = self._skill(
+                    f"---\nname: thing\ndescription: Does X. Use when Y.\n---\n{phrase}\n"
+                )
+                self.assertEqual(len(self._run(sk011, self._inv(skills=[s]))), 1, phrase)
+
     def test_sk014_fires_on_frontmatter_that_did_not_parse(self):
         from studio.rules.skills import sk014
 
@@ -5851,3 +5977,512 @@ class ThePreloadFigureIsPerSessionEverywhere(unittest.TestCase):
     def test_a_single_runtime_setup_still_reports_its_cost(self):
         out = self._text({"claude": {"est_tokens": 10126}})
         self.assertIn("10,126", out)
+
+
+class UnusedIsOnlyClaimedWhereUsageCouldShowIt(unittest.TestCase):
+    """CB002 calls a plugin unused on the strength of the usage index.
+
+    The index records skills, commands, agents and MCP tools. It does not record
+    hook firing - so a plugin that ships nothing but hooks sits at zero
+    invocations however often it runs, and "unused" is not a claim that evidence
+    can support. It was reported anyway, with a one-click remedy to disable it:
+    three working hook plugins were one click from being switched off on evidence
+    that could never have said otherwise.
+    """
+
+    def _plugins(self, contributes, *, skill_count=0):
+        from studio.model import Plugin
+
+        return [
+            Plugin(
+                id="plugin:claude:p@m",
+                key="p@m",
+                marketplace="m",
+                runtime=Runtime.CLAUDE,
+                enabled=True,
+                skill_count=skill_count,
+                contributes=set(contributes),
+            )
+        ]
+
+    def _run(self, contributes, *, skill_count=0, usage=None):
+        from studio.rules.context import cb002
+
+        inv = Inventory()
+        inv.plugins = self._plugins(contributes, skill_count=skill_count)
+        inv.roots = {"claude": "/tmp"}
+        cfg = Config(repo_root=".")
+        cfg.usage_available = True
+        cfg.usage_complete = True
+        cfg.plugin_usage = usage or {}
+        return list(cb002(inv, cfg))
+
+    def test_a_hook_only_plugin_is_not_called_unused(self):
+        self.assertEqual(self._run({"hooks"}), [])
+
+    def test_a_skill_plugin_with_no_usage_is_still_reported(self):
+        """The case the rule exists for must keep working."""
+        self.assertEqual(len(self._run({"skills"}, skill_count=3)), 1)
+
+    def test_an_mcp_plugin_with_no_usage_is_still_reported(self):
+        """MCP tool calls are recorded, so zero really does mean unused."""
+        self.assertEqual(len(self._run({"mcp"})), 1)
+
+    def test_a_plugin_shipping_nothing_at_all_is_reported(self):
+        """Contributing nothing is pure overhead, whatever the usage index says."""
+        self.assertEqual(len(self._run(set())), 1)
+
+    def test_a_plugin_with_hooks_and_skills_is_judged_on_the_skills(self):
+        """Mixed shapes are still observable through the half that is recorded."""
+        self.assertEqual(len(self._run({"hooks", "skills"}, skill_count=2)), 1)
+
+    def test_recorded_usage_still_clears_it(self):
+        self.assertEqual(self._run({"skills"}, skill_count=3, usage={"p": 5}), [])
+
+    def test_the_finding_says_what_the_plugin_ships(self):
+        """A reader deciding whether to disable needs to know what they lose."""
+        (found,) = self._run({"skills", "mcp"}, skill_count=1)
+        self.assertEqual(found.evidence["contributes"], ["mcp", "skills"])
+
+
+class ALiveBackupIsNotAStrayFile(unittest.TestCase):
+    """CB004 flags leftovers, and a backup its owner still maintains is not one.
+
+    `~/.codex/.codex-global-state.json.bak` was quarantined and Codex rewrote it
+    seven minutes later. The finding could never be cleared, and acting on it
+    fought the tool that owns the file. A live backup tracks its principal; a
+    stray one is left behind when the principal moves on.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, *, age_gap_days=None, principal=True):
+        from studio.rules.context import cb004
+
+        bak = os.path.join(self.root, "settings.json.bak")
+        with open(bak, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        if principal:
+            live = os.path.join(self.root, "settings.json")
+            with open(live, "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+            if age_gap_days is not None:
+                old = os.path.getmtime(live) - age_gap_days * 24 * 3600
+                os.utime(bak, (old, old))
+        inv = Inventory()
+        inv.roots = {"codex": self.root}
+        return list(cb004(inv, Config(repo_root=".")))
+
+    def test_a_backup_written_alongside_its_principal_is_left_alone(self):
+        self.assertEqual(self._run(age_gap_days=0), [])
+
+    def test_a_backup_its_owner_stopped_maintaining_is_still_reported(self):
+        """The case the rule exists for: the principal moved on, this did not."""
+        self.assertEqual(len(self._run(age_gap_days=90)), 1)
+
+    def test_a_backup_with_no_principal_left_is_still_reported(self):
+        """Nothing owns it any more, so nothing will rewrite it."""
+        self.assertEqual(len(self._run(principal=False)), 1)
+
+
+class ALicenceMeansSomeoneElseWroteIt(unittest.TestCase):
+    """Living under ~/.claude/skills was taken to mean "you wrote this".
+
+    38 of the 92 skills there arrived from OpenAI, Figma and Notion, each
+    carrying its own licence file. Counting them as the user's own overstated
+    what they had authored, let the editor offer to change files the next
+    upgrade overwrites, and made their findings block a verdict the user had no
+    way to act on. Nobody ships a licence with a skill they wrote for their own
+    machine.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _skill_dir(self, name, extra_files=()):
+        d = os.path.join(self._tmp.name, name)
+        os.makedirs(d)
+        path = os.path.join(d, "SKILL.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("---\nname: x\ndescription: Does X. Use when Y.\n---\nbody\n")
+        for f in extra_files:
+            with open(os.path.join(d, f), "w", encoding="utf-8") as fh:
+                fh.write("terms\n")
+        return path
+
+    def test_a_skill_shipped_with_a_licence_is_not_yours(self):
+        from studio.scan import _redistributed
+
+        for marker in ("LICENSE", "LICENSE.txt", "LICENCE", "NOTICE.txt", "license.md"):
+            with self.subTest(marker=marker):
+                self.assertTrue(_redistributed(self._skill_dir(f"s-{marker}", [marker])))
+
+    def test_a_skill_you_wrote_is_left_alone(self):
+        from studio.scan import _redistributed
+
+        self.assertFalse(_redistributed(self._skill_dir("mine", ["README.md", "notes.md"])))
+
+    def test_a_missing_directory_is_not_treated_as_redistributed(self):
+        """Guessing "vendor" on an unreadable path would silently make a file
+        uneditable for a reason the user cannot see."""
+        from studio.scan import _redistributed
+
+        self.assertFalse(_redistributed(os.path.join(self._tmp.name, "gone", "SKILL.md")))
+
+
+class EveryRuleDecoratesItsOwnFunction(unittest.TestCase):
+    """A structural guard against a mistake made twice while writing these rules.
+
+    Inserting a helper between `@rule(...)` and the function it decorates
+    registers the *helper* as the rule. Both times the result was a rule that
+    silently produced one bogus finding or crashed mid-run, and both times the
+    only symptom was a number that looked slightly wrong. The registered
+    function's name is derived from the code, so the mismatch is detectable.
+    """
+
+    def test_the_registered_function_is_named_after_its_rule(self):
+        from studio.rules import REGISTRY, ensure_loaded
+
+        ensure_loaded()
+        wrong = [
+            (r.code, r.fn.__name__)
+            for r in REGISTRY
+            if r.fn.__name__ != r.code.lower()
+        ]
+        self.assertEqual(
+            wrong,
+            [],
+            "a @rule decorator landed on the wrong function - a helper was "
+            f"probably inserted between the decorator and its rule: {wrong}",
+        )
+
+
+class NamingTheSiblingResolvesTheCompetition(unittest.TestCase):
+    """SK017's own remedy is to narrow a description so each states a distinct
+    trigger. The clearest way to do that is to name the other skill and say when
+    to prefer it - and doing so *raised* the score, because the sibling's name
+    lands in both vocabularies. Following the advice scored worse than ignoring
+    it.
+    """
+
+    def _pair(self, desc_a, desc_b):
+        from studio.rules.skills import sk017
+
+        skills = []
+        for name, desc in (("alpha", desc_a), ("beta", desc_b)):
+            skills.append(
+                Skill(
+                    id=f"s:{name}",
+                    name=name,
+                    dir_name=name,
+                    path=f"/p/{name}/SKILL.md",
+                    runtime=Runtime.CLAUDE,
+                    origin=Origin.LOCAL,
+                    description=desc,
+                    body_lines=10,
+                )
+            )
+        inv = Inventory()
+        inv.skills = skills
+        cfg = Config(repo_root=".")
+        cfg.skill_usage = {}
+        return list(sk017(inv, cfg))
+
+    #: Two descriptions built from the same words, so they genuinely compete.
+    SHARED = (
+        "Repairs sprint backlog cards and review issues in the notion product "
+        "structure model, covering feature hub and repo execution scope."
+    )
+
+    def test_two_overlapping_descriptions_are_reported(self):
+        """The case the rule exists for."""
+        self.assertEqual(len(self._pair(self.SHARED, self.SHARED + " Also figma routing.")), 1)
+
+    def test_naming_the_other_skill_clears_it(self):
+        self.assertEqual(
+            self._pair(self.SHARED + " For the structure itself see beta.", self.SHARED),
+            [],
+        )
+
+    def test_a_name_that_is_merely_a_substring_does_not_count(self):
+        """A plain substring test let a skill called `doc` be "named" by any
+        description containing `documentation`, silently exempting pairs that
+        really were competing - the opposite of what this rule is for."""
+        from studio.rules.skills import sk017
+
+        shared = (
+            "Generates documentation for sprint backlog cards and review issues "
+            "across the notion product structure model and feature hub scope."
+        )
+        skills = []
+        for name in ("doc", "other-doc-tool"):
+            skills.append(
+                Skill(
+                    id=f"s:{name}", name=name, dir_name=name, path=f"/p/{name}/SKILL.md",
+                    runtime=Runtime.CLAUDE, origin=Origin.LOCAL,
+                    description=shared, body_lines=10,
+                )
+            )
+        inv = Inventory()
+        inv.skills = skills
+        cfg = Config(repo_root=".")
+        cfg.skill_usage = {}
+        self.assertEqual(len(list(sk017(inv, cfg))), 1, "substring match exempted a real conflict")
+
+    def test_it_works_in_either_direction(self):
+        self.assertEqual(
+            self._pair(self.SHARED, self.SHARED + " To carry out the work use alpha."),
+            [],
+        )
+
+
+class PreloadCostIsChargedToTheRuntimeThatLoadsIt(unittest.TestCase):
+    """Which runtime pays for a skill is decided by the directory it was scanned
+    from, not by whether it happens to be vendor content.
+
+    The split was derived from origin - "plugins and toolkits install under
+    ~/.claude, so they are Claude's cost alone" - which is true of plugins and
+    false of the 36 toolkit skills under ~/.codex/skills. It charged Codex's
+    cost to Claude and moved ~3,000 tokens to the wrong side of the headline
+    figure the whole cold-skill analysis rests on.
+    """
+
+    def _skill(self, name, runtime, origin, desc="x" * 40):
+        return Skill(
+            id=f"s:{name}",
+            name=name,
+            dir_name=name,
+            path=f"/p/{name}/SKILL.md",
+            runtime=runtime,
+            origin=origin,
+            description=desc,
+            body_lines=1,
+        )
+
+    def _per_runtime(self, skills):
+        from studio.health import _metrics
+
+        inv = Inventory()
+        inv.skills = skills
+        return _metrics(inv, Config(repo_root="."))["preloaded_skill_metadata"]["per_runtime"]
+
+    def test_a_toolkit_skill_in_the_codex_tree_is_codex_cost(self):
+        per = self._per_runtime([self._skill("a", Runtime.CODEX, Origin.TOOLKIT)])
+        self.assertEqual(per["codex"]["skills"], 1)
+        self.assertEqual(per["claude"]["skills"], 0)
+
+    def test_a_toolkit_skill_in_the_claude_tree_is_claude_cost(self):
+        per = self._per_runtime([self._skill("a", Runtime.CLAUDE, Origin.TOOLKIT)])
+        self.assertEqual(per["claude"]["skills"], 1)
+        self.assertEqual(per["codex"]["skills"], 0)
+
+    def test_a_plugin_skill_is_claude_cost(self):
+        """Plugins are genuinely Claude-only, and the scanner records that."""
+        per = self._per_runtime([self._skill("a", Runtime.CLAUDE, Origin.PLUGIN)])
+        self.assertEqual(per["claude"]["skills"], 1)
+
+    def test_an_orphan_library_skill_costs_neither(self):
+        """Nothing loads it, so charging it to a runtime would invent a cost."""
+        per = self._per_runtime([self._skill("a", Runtime.UNKNOWN, Origin.ORPHAN_LIBRARY)])
+        self.assertEqual(per["claude"]["skills"] + per["codex"]["skills"], 0)
+
+    def test_the_two_runtimes_are_not_double_counted(self):
+        per = self._per_runtime(
+            [
+                self._skill("a", Runtime.CLAUDE, Origin.TOOLKIT),
+                self._skill("b", Runtime.CODEX, Origin.TOOLKIT),
+            ]
+        )
+        self.assertEqual(per["claude"]["skills"], 1)
+        self.assertEqual(per["codex"]["skills"], 1)
+
+
+class VendorFindingsAreGroupedIntoDecisions(unittest.TestCase):
+    """133 line items about content an upgrade overwrites is not a backlog.
+
+    Editing any of those files is undone on the next upgrade, so the only lever
+    is per source: keep this plugin, keep this toolkit, or don't. Reported
+    per-finding, the number read as work outstanding when it describes what
+    other people shipped - and 109 of the 133 turned out to be one toolkit.
+    """
+
+    def _skill(self, name, *, plugin="", origin=Origin.PLUGIN, path=None):
+        return Skill(
+            id=f"s:{name}",
+            name=name,
+            dir_name=name,
+            path=path or f"/p/{name}/SKILL.md",
+            runtime=Runtime.CLAUDE,
+            origin=origin,
+            description="d",
+            body_lines=1,
+            plugin=plugin,
+        )
+
+    def _finding(self, rule, path, owner=Owner.VENDOR, waived=False):
+        return Finding(
+            rule=rule, severity=Severity.MINOR, title="t", detail="d", path=path,
+            owner=owner, waived=waived,
+        )
+
+    def _group(self, skills, findings, roots=None):
+        from studio.health import _vendor_by_source
+
+        inv = Inventory()
+        inv.skills = skills
+        inv.roots = roots or {}
+        return _vendor_by_source(findings, inv)
+
+    def test_findings_from_one_plugin_collapse_to_one_row(self):
+        skills = [self._skill("a", plugin="p@m"), self._skill("b", plugin="p@m")]
+        out = self._group(
+            skills,
+            [self._finding("SK005", "/p/a/SKILL.md"), self._finding("SK007", "/p/b/SKILL.md")],
+        )
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0], {"kind": "plugin", "name": "p@m", "findings": 2,
+                                  "rules": {"SK005": 1, "SK007": 1}})
+
+    def test_a_toolkit_that_installs_fifty_skills_is_one_decision(self):
+        """The grouping that matters most: 109 of the 133 findings came from one
+        toolkit, and per-skill rows spread that across 50 lines nobody can act
+        on individually - removing one skill of a toolkit is undone on upgrade.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skills_dir = os.path.join(tmp, "skills")
+            # The toolkit is a git repo inside the skills directory; the skills
+            # it manages appear beside it, which is where the agent loads them.
+            kit = os.path.join(skills_dir, "mykit")
+            os.makedirs(os.path.join(kit, ".git"))
+            with open(os.path.join(kit, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write("---\nname: mykit\n---\nbody\n")
+            installed = []
+            for name in ("alpha", "beta"):
+                os.makedirs(os.path.join(kit, name))
+                with open(os.path.join(kit, name, "SKILL.md"), "w", encoding="utf-8") as fh:
+                    fh.write(f"---\nname: {name}\n---\nbody\n")
+                d = os.path.join(skills_dir, name)
+                os.makedirs(d)
+                path = os.path.join(d, "SKILL.md")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(f"---\nname: {name}\n---\nbody\n")
+                installed.append(path)
+            skills = [
+                self._skill(n, origin=Origin.TOOLKIT, path=p)
+                for n, p in zip(("alpha", "beta"), installed)
+            ]
+            out = self._group(
+                skills, [self._finding("SK005", p) for p in installed], roots={"claude": tmp}
+            )
+        self.assertEqual(len(out), 1, f"toolkit split into separate rows: {out}")
+        self.assertEqual(out[0]["kind"], "toolkit")
+        self.assertEqual(out[0]["name"], "mykit")
+        self.assertEqual(out[0]["findings"], 2)
+
+    def test_two_unrelated_skills_sharing_a_name_stay_separate(self):
+        """Merging them would report one decision where there are two: each lives
+        in its own directory and is removed on its own."""
+        skills = [
+            self._skill("same", origin=Origin.TOOLKIT, path="/a/same/SKILL.md"),
+            self._skill("same", origin=Origin.TOOLKIT, path="/b/same/SKILL.md"),
+        ]
+        out = self._group(
+            skills,
+            [self._finding("SK005", "/a/same/SKILL.md"), self._finding("SK005", "/b/same/SKILL.md")],
+        )
+        self.assertEqual(len(out), 2, f"unrelated skills merged: {out}")
+
+    def test_local_findings_are_not_included(self):
+        """The panel is about what you cannot fix."""
+        skills = [self._skill("a", plugin="p@m")]
+        out = self._group(skills, [self._finding("SK005", "/p/a/SKILL.md", owner=Owner.LOCAL)])
+        self.assertEqual(out, [])
+
+    def test_a_waived_finding_is_not_counted_again(self):
+        skills = [self._skill("a", plugin="p@m")]
+        out = self._group(skills, [self._finding("SK005", "/p/a/SKILL.md", waived=True)])
+        self.assertEqual(out, [])
+
+    def test_the_biggest_source_comes_first(self):
+        """The row a reader should act on is the one at the top."""
+        skills = [self._skill("a", plugin="small@m"), self._skill("b", plugin="big@m"),
+                  self._skill("c", plugin="big@m")]
+        out = self._group(
+            skills,
+            [
+                self._finding("SK005", "/p/a/SKILL.md"),
+                self._finding("SK005", "/p/b/SKILL.md"),
+                self._finding("SK005", "/p/c/SKILL.md"),
+            ],
+        )
+        self.assertEqual([g["name"] for g in out], ["big@m", "small@m"])
+
+    def test_a_finding_with_no_matching_skill_still_lands_somewhere(self):
+        """Dropping it would make the grouped total disagree with the count."""
+        out = self._group([], [self._finding("SK005", "/elsewhere/x/SKILL.md")])
+        self.assertEqual(sum(g["findings"] for g in out), 1)
+
+
+class EveryInventoryFieldSurvivesSerialisation(unittest.TestCase):
+    """/api/inventory is the call every panel waits on.
+
+    Adding one set-valued field to Plugin made it raise, the endpoint returned
+    500, and the whole dashboard rendered blank - the failure was nowhere near
+    the field that caused it. The encoder handles sets now, and this walks the
+    real inventory so a future field cannot repeat it.
+    """
+
+    def test_a_set_valued_field_serialises(self):
+        from studio.model import Plugin, to_json
+
+        p = Plugin(
+            id="plugin:claude:p@m",
+            key="p@m",
+            marketplace="m",
+            runtime=Runtime.CLAUDE,
+            enabled=True,
+            contributes={"skills", "hooks"},
+        )
+        self.assertEqual(json.loads(to_json(p))["contributes"], ["hooks", "skills"])
+
+    def test_the_output_is_stable_across_runs(self):
+        """It is diffed and cached, and set iteration order is not stable."""
+        from studio.model import Plugin, to_json
+
+        def once():
+            return to_json(
+                Plugin(
+                    id="i", key="k", marketplace="m", runtime=Runtime.CLAUDE,
+                    enabled=True, contributes={"mcp", "agents", "skills", "hooks"},
+                )
+            )
+
+        self.assertEqual(once(), once())
+
+    def test_a_set_of_mixed_types_still_serialises(self):
+        """sorted() raises on {1, "1"}, which would take the whole response down
+        for a field nobody was looking at."""
+        from studio.model import Finding, to_json
+
+        f = Finding(
+            rule="X", severity=Severity.MINOR, title="t", detail="d",
+            evidence={"mixed": {1, "1"}},
+        )
+        self.assertEqual(len(json.loads(to_json(f))["evidence"]["mixed"]), 2)
+
+    def test_a_real_scan_serialises_end_to_end(self):
+        """The regression was found by loading the page, not by a unit test."""
+        from studio.model import to_json
+        from studio.scan import scan
+
+        json.loads(to_json(scan()))
