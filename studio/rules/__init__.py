@@ -62,10 +62,19 @@ class Waiver:
     rule: str
     path_glob: str
     reason: str
+    #: Resolved at load time for a ``toolkit:<name>`` scope. See :meth:`matches`.
+    scope_paths: frozenset[str] = frozenset()
 
     def matches(self, finding: Finding) -> bool:
         if self.rule not in ("*", finding.rule):
             return False
+        # A toolkit installs its skills *beside* the ones you wrote, in the same
+        # directory, so no path pattern separates them: a glob wide enough to
+        # cover gstack also silences your own files, which is the one thing a
+        # waiver must never do. Scoping by toolkit asks the toolkit what it
+        # manages instead, and covers exactly that.
+        if self.path_glob.startswith("toolkit:"):
+            return os.path.realpath(finding.path) in self.scope_paths
         if self.path_glob in ("*", ""):
             return True
         # Findings carry absolute paths while people write `~/.claude/...` -
@@ -155,10 +164,34 @@ class Config:
                 rule=w.get("rule", "*"),
                 path_glob=w.get("path", "*"),
                 reason=w.get("reason", ""),
+                scope_paths=_toolkit_scope(w.get("path", "")),
             )
             for w in (data.get("waivers", []) or [])
         ]
         return cfg
+
+
+def _toolkit_scope(path_glob: str) -> frozenset[str]:
+    """Resolve ``toolkit:<name>`` to the set of files that toolkit manages.
+
+    Read once at load rather than per finding: discovery shells out to git, and
+    a rule that fires a hundred times would otherwise pay for it a hundred
+    times. An unknown name resolves to the empty set, so a typo waives nothing
+    rather than everything.
+    """
+    if not path_glob.startswith("toolkit:"):
+        return frozenset()
+    wanted = path_glob[len("toolkit:") :].strip()
+    from .. import toolkits as toolkits_mod
+
+    dirs = [
+        os.path.join(os.path.expanduser("~"), d, "skills")
+        for d in (".claude", ".codex")
+    ]
+    kits = [k for k in toolkits_mod.discover(dirs) if k.name == wanted]
+    return frozenset(
+        os.path.realpath(p) for p in toolkits_mod.managed_paths(kits)
+    )
 
 
 RuleFn = Callable[[Inventory, Config], Iterator[Finding]]

@@ -6638,3 +6638,118 @@ class TheUsageMapNeverTakesThePageDown(unittest.TestCase):
         self._write(json.dumps({"tokens": "nope"}))
         r = self._run()
         self.assertEqual(r["counts"], {})
+
+
+class AToolkitWaiverCoversTheToolkitAndNothingElse(unittest.TestCase):
+    """A toolkit installs its skills *beside* the ones you wrote.
+
+    No path pattern separates them: a glob wide enough to cover gstack's 54
+    files also silences the 53 in the same directory that you own, which is the
+    one thing a waiver must never do. Scoping by toolkit asks the toolkit what
+    it manages instead.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.skills = os.path.join(self._tmp.name, ".claude", "skills")
+        kit = os.path.join(self.skills, "mykit")
+        os.makedirs(os.path.join(kit, ".git"))
+        with open(os.path.join(kit, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: mykit\n---\nbody\n")
+        # One managed skill and one you wrote, side by side.
+        for owner, name in (("kit", "managed"), ("you", "mine")):
+            if owner == "kit":
+                os.makedirs(os.path.join(kit, name))
+                with open(os.path.join(kit, name, "SKILL.md"), "w", encoding="utf-8") as fh:
+                    fh.write("---\nname: managed\n---\nbody\n")
+            d = os.path.join(self.skills, name)
+            os.makedirs(d)
+            with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write(f"---\nname: {name}\n---\nbody\n")
+        self.managed = os.path.join(self.skills, "managed", "SKILL.md")
+        self.mine = os.path.join(self.skills, "mine", "SKILL.md")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _waiver(self, glob):
+        from studio.rules import Waiver, _toolkit_scope
+
+        with mock.patch("os.path.expanduser", lambda p: p.replace("~", self._tmp.name, 1)):
+            scope = _toolkit_scope(glob)
+        return Waiver(rule="SK005", path_glob=glob, reason="r", scope_paths=scope)
+
+    def _finding(self, path):
+        return Finding(rule="SK005", severity=Severity.MINOR, title="t", detail="d", path=path)
+
+    def test_it_covers_what_the_toolkit_manages(self):
+        self.assertTrue(self._waiver("toolkit:mykit").matches(self._finding(self.managed)))
+
+    def test_it_does_not_cover_your_own_file_in_the_same_directory(self):
+        """The whole reason for the scope."""
+        self.assertFalse(self._waiver("toolkit:mykit").matches(self._finding(self.mine)))
+
+    def test_an_unknown_toolkit_waives_nothing(self):
+        """A typo must silence nothing rather than everything."""
+        w = self._waiver("toolkit:no-such-kit")
+        self.assertFalse(w.matches(self._finding(self.managed)))
+        self.assertFalse(w.matches(self._finding(self.mine)))
+
+    def test_the_rule_code_still_has_to_match(self):
+        w = self._waiver("toolkit:mykit")
+        other = Finding(rule="SK007", severity=Severity.MINOR, title="t", detail="d", path=self.managed)
+        self.assertFalse(w.matches(other))
+
+    def test_a_plain_glob_still_works(self):
+        """The scope is an addition, not a replacement."""
+        from studio.rules import Waiver
+
+        w = Waiver(rule="SK005", path_glob=self.skills + "/*/SKILL.md", reason="r")
+        self.assertTrue(w.matches(self._finding(self.mine)))
+
+
+class ASymlinkIntoAToolkitIsToolkitContent(unittest.TestCase):
+    """The same file is often linked from both runtimes.
+
+    ~/.codex/skills/design-review/SKILL.md is a symlink into
+    ~/.claude/skills/gstack/. Matching the literal path recognised only the side
+    the toolkit itself listed, so the other side was classified as yours - and
+    the editor offered to change it, which writes through the link into the
+    toolkit's own file for the next upgrade to overwrite.
+    """
+
+    def test_a_link_into_the_toolkit_is_classified_as_toolkit_content(self):
+        from studio import scan as scan_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            claude = os.path.join(tmp, ".claude")
+            codex = os.path.join(tmp, ".codex")
+            kit = os.path.join(claude, "skills", "mykit")
+            os.makedirs(os.path.join(kit, ".git"))
+            os.makedirs(os.path.join(kit, "shared"))
+            os.makedirs(os.path.join(codex, "skills"))
+            with open(os.path.join(kit, "SKILL.md"), "w", encoding="utf-8") as fh:
+                fh.write("---\nname: mykit\ndescription: Does X. Use when Y.\n---\nbody\n")
+            real = os.path.join(kit, "shared", "SKILL.md")
+            with open(real, "w", encoding="utf-8") as fh:
+                fh.write("---\nname: shared\ndescription: Does X. Use when Y.\n---\nbody\n")
+            # Installed into both runtimes as links, which is what a toolkit does.
+            for base in (os.path.join(claude, "skills"), os.path.join(codex, "skills")):
+                d = os.path.join(base, "shared")
+                os.makedirs(d, exist_ok=True)
+                os.symlink(real, os.path.join(d, "SKILL.md"))
+
+            with mock.patch.object(scan_mod, "CLAUDE_DIR", claude), mock.patch.object(
+                scan_mod, "CODEX_DIR", codex
+            ), mock.patch.object(scan_mod, "AGENT_LIB_DIR", os.path.join(tmp, ".agent")):
+                inv = scan_mod.scan()
+
+        origins = {
+            (s.runtime.value, s.name): s.origin.value for s in inv.skills if s.name == "shared"
+        }
+        self.assertEqual(
+            origins.get(("codex", "shared")),
+            "toolkit",
+            f"the Codex-side link was not recognised as toolkit content: {origins}",
+        )
+        self.assertEqual(origins.get(("claude", "shared")), "toolkit")

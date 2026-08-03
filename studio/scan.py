@@ -741,9 +741,18 @@ def scan() -> Inventory:
     kits = toolkits_mod.discover(
         [os.path.join(CLAUDE_DIR, "skills"), os.path.join(CODEX_DIR, "skills")]
     )
-    owned = toolkits_mod.managed_paths(kits)
+    # Compared as resolved paths. A toolkit installs its skills as symlinks, and
+    # the same file can be linked from both runtimes - ~/.codex/skills/x/SKILL.md
+    # pointing into ~/.claude/skills/gstack/. Matching the literal path
+    # recognised only the side the toolkit itself listed, so the other side was
+    # reported as "你自己寫的" and the editor offered to change it, which writes
+    # through the link into the toolkit's own file for the next upgrade to
+    # overwrite.
+    owned = {os.path.realpath(p) for p in toolkits_mod.managed_paths(kits)}
     for s in inv.skills:
-        if s.origin is Origin.LOCAL and (s.path in owned or _redistributed(s.path)):
+        if s.origin is Origin.LOCAL and (
+            os.path.realpath(s.path) in owned or _redistributed(s.path)
+        ):
             s.origin = Origin.TOOLKIT
     inv.toolkits = [k.to_dict() for k in kits]
 
