@@ -26,6 +26,7 @@ import secrets
 import threading
 import webbrowser
 from http import HTTPStatus
+from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -289,8 +290,24 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send(self._specs())
             if route == "/api/schedule":
                 return self._send(self._schedule())
+            if route == "/api/usage-map":
+                # Invocation counts per skill name, read from the cached usage
+                # index. The catalogue needs it to order by what you actually
+                # use: an alphabetical list of 222 skills puts the ones you have
+                # never touched above the ones you run every day.
+                return self._send(self._usage_map())
             if route == "/api/backups":
                 return self._send(patch.list_backups(self.repo_root))
+            if route == "/api/backup":
+                # Per-restore-point diff. A name and a file count is not enough
+                # to decide whether to press "還原".
+                bid = query.get("id", [""])[0]
+                if not bid or "/" in bid or ".." in bid:
+                    return self._send({"error": "bad backup id"}, HTTPStatus.BAD_REQUEST)
+                try:
+                    return self._send(patch.backup_diff(self.repo_root, bid))
+                except FileNotFoundError as exc:
+                    return self._send({"error": str(exc)}, HTTPStatus.NOT_FOUND)
             if route == "/api/session":
                 return self._send(
                     {
@@ -948,6 +965,44 @@ class Handler(SimpleHTTPRequestHandler):
             # six were checked, so a reader could hand-edit a generated skill
             # believing sync did not cover it.
             "targets": [os.path.basename(c.path) for c in changes],
+        }
+
+    def _usage_map(self) -> dict:
+        """Skill invocation counts, read from the report the tool already wrote.
+
+        Never builds. `usage.build(use_cache=True)` still walks the history to
+        decide whether the cache is current - 55 seconds against 27.9 GB - and
+        putting that in the page's first paint left the whole dashboard stuck on
+        "載入中…" behind a number used only to order a list. The report on disk
+        is what every other page already shows; a count that is a few days old
+        orders a list perfectly well, and the file's own timestamp is returned
+        so the page can say how fresh it is.
+        """
+        path = os.path.join(self.repo_root, "var", "usage.json")
+        if not os.path.isfile(path):
+            return {
+                "available": False,
+                "reason": "尚未產生用量索引，跑一次健檢就會有",
+                "counts": {},
+            }
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            return {"available": False, "reason": f"{type(exc).__name__}: {exc}", "counts": {}}
+        if not isinstance(data, dict):
+            # Valid JSON of the wrong shape. Parsing succeeded, so the decode
+            # guard above does not catch it, and `.get` on a list raised - a 500
+            # from a file that only orders a list.
+            return {"available": False, "reason": "usage.json 格式不符（不是物件）", "counts": {}}
+        counts = data.get("tokens")
+        return {
+            "available": True,
+            "counts": counts if isinstance(counts, dict) else {},
+            "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
+            "generated_at": datetime.fromtimestamp(
+                os.path.getmtime(path), tz=timezone.utc
+            ).isoformat(timespec="seconds"),
         }
 
     def _summary(self, fresh: bool) -> dict:

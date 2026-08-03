@@ -308,6 +308,11 @@ def apply(cs: ChangeSet, repo_root: str, *, dry_run: bool = False) -> dict:
             if existed and c.path not in backed_up:
                 shutil.copy2(c.path, _mirror_path(slot, c.path))
                 backed_up.add(c.path)
+            # Measured before the write. `stat()` reads the file from disk to
+            # work out what changed, so computing it afterwards diffed the new
+            # content against itself: every restore point recorded added=0,
+            # removed=0, however much had actually changed.
+            stat = c.stat()
             if c.action == "delete":
                 if existed:
                     os.remove(c.path)
@@ -316,7 +321,7 @@ def apply(cs: ChangeSet, repo_root: str, *, dry_run: bool = False) -> dict:
                 _write(c.path, c.new_text)
             record.append(
                 {
-                    **c.stat(),
+                    **stat,
                     "existed_before": existed,
                     "was_symlink": was_link,
                     "symlink_target": link_target,
@@ -358,6 +363,68 @@ def list_backups(repo_root: str) -> list[dict]:
             continue
         out.append({"id": entry, "path": os.path.join(root, entry), **data})
     return out
+
+
+def backup_diff(repo_root: str, backup_id: str) -> dict:
+    """What a restore point would put back, file by file, as a unified diff.
+
+    A restore point listed a change-set name and a file count, which is not
+    enough to decide whether to press the button. The saved bytes are right
+    there in the slot, so the diff between them and what is on disk now is the
+    honest answer to "what did this change".
+    """
+    slot = os.path.join(repo_root, BACKUP_DIR, backup_id)
+    man = os.path.join(slot, "manifest.json")
+    if not os.path.isfile(man):
+        raise FileNotFoundError(f"no backup manifest at {man}")
+    with open(man, encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    files: list[dict] = []
+    for entry in data.get("changes", []):
+        path = entry.get("path", "")
+        saved = _mirror_path(slot, path) if path else ""
+        before = ""
+        if saved and os.path.isfile(saved):
+            with open(saved, encoding="utf-8", errors="replace") as fh:
+                before = fh.read()
+        after = ""
+        if path and os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                after = fh.read()
+        # The restore direction: pressing the button replaces `after` with
+        # `before`, so that is the direction the diff is written in.
+        diff = "\n".join(
+            difflib.unified_diff(
+                after.split("\n"),
+                before.split("\n"),
+                fromfile=f"{path} (現在)",
+                tofile=f"{path} (還原後)",
+                lineterm="",
+                n=3,
+            )
+        )
+        files.append(
+            {
+                "path": path,
+                "action": entry.get("action", ""),
+                "existed_before": entry.get("existed_before", True),
+                "added": entry.get("added", 0),
+                "removed": entry.get("removed", 0),
+                "reason": entry.get("reason", ""),
+                "diff": diff,
+                "binary": False,
+                "unchanged": not diff,
+            }
+        )
+    return {
+        "id": backup_id,
+        "change_set": data.get("name", ""),
+        "description": data.get("description", ""),
+        "applied_at": data.get("applied_at", ""),
+        "removed_dirs": data.get("removed_dirs", []),
+        "files": files,
+    }
 
 
 def rollback(repo_root: str, backup_id: str) -> dict:

@@ -290,10 +290,50 @@ function catalogueSections(kind, rows, { expandAll = false } = {}) {
     .join('');
 }
 
+/* Most-used first, then alphabetical.
+ *
+ * An alphabetical list of 222 skills puts the ones you have never touched above
+ * the ones you run every day, which is the opposite of useful: the top of the
+ * list should be the things you actually reach for. Skills with no recorded use
+ * keep their alphabetical order among themselves - "never invoked" is not a
+ * ranking, so there is nothing to rank them by.
+ */
+let usageCounts = {};
+
+function setUsageCounts(counts) {
+  usageCounts = counts || {};
+}
+
+function hitsFor(row) {
+  const byName = usageCounts[String(row.name || '').toLowerCase()];
+  const byDir = usageCounts[String(row.dir_name || '').toLowerCase()];
+  const n = Math.max(byName || 0, byDir || 0);
+  return n || 0;
+}
+
 function sortRows(rows) {
   return rows
     .slice()
-    .sort((a, b) => String(a.name || a.path).localeCompare(String(b.name || b.path)));
+    .sort(
+      (a, b) =>
+        hitsFor(b) - hitsFor(a) ||
+        String(a.name || a.path).localeCompare(String(b.name || b.path)),
+    );
+}
+
+/* How often this has actually been invoked, from your own history.
+ *
+ * Shown on the card because "should I keep this?" is the question the catalogue
+ * gets asked most, and a count answers it better than any amount of prose.
+ * Absent rather than zero when there is no usage index: 0 would read as "never
+ * used" when the truth is "not measured".
+ */
+function hitsBadge(r) {
+  if (!usageCounts || !Object.keys(usageCounts).length) return '';
+  const n = hitsFor(r);
+  return n
+    ? `<span class="tag ok" title="你的歷史紀錄裡叫過 ${escapeHtml(n)} 次">用過 ${num(n)} 次</span>`
+    : '<span class="tag" title="完整歷史裡沒有紀錄。可能只是還沒遇到對的情境。">沒叫過</span>';
 }
 
 function catalogueCard(kind, r) {
@@ -311,6 +351,7 @@ function catalogueCard(kind, r) {
         <b class="mono">${escapeHtml(name)}</b>${src}${rt}
         ${r.plugin ? `<span class="tag">來自 ${escapeHtml(r.plugin)}</span>` : ''}
         <span class="grow"></span>
+        ${hitsBadge(r)}
         <span class="muted mono" style="font-size:12px">${r.body_lines} 行${big ? ' ⚠' : ''}</span>
       </div>
       <div class="cat-d">${
@@ -445,8 +486,16 @@ function specsHtml(payload) {
       ? `<div class="result"><b>${changed} 份規範有變動</b><div>依據它們的規則需要重新確認。按「分析變動對規則的影響」讓模型逐條檢視，或自己開連結比對。</div></div>`
       : '<div class="result ok"><b>✓ 所有引用的規範都跟基準一致</b><div>規則依據的文件沒有改版。</div></div>';
 
+  const how = `<div class="spec-how">
+    <b>怎麼判定「有變動」</b>：抓下每個網址的正文，正規化空白後取雜湊，跟你上次按
+    「記為已檢視」時存下的基準比。<b>雜湊不同就是變動</b> —— 沒有模型參與，也不看語意，
+    所以不會有誤判成「沒變」的情況。基準存在
+    <code class="mono">canonical/spec-baseline.json</code>。
+  </div>`;
+
   return (
     banner +
+    how +
     rows
       .map((r) => {
         const [cls, label] = SPEC_STATE[r.status] || SPEC_STATE.unknown;
@@ -456,6 +505,11 @@ function specsHtml(payload) {
             <a href="${escapeHtml(r.url)}" target="_blank" rel="noreferrer">${escapeHtml(r.url)}</a>
           </div>
           <div class="sub">依據它的 ${r.rules.length} 條規則：<span class="mono">${r.rules.map(escapeHtml).join(', ')}</span></div>
+          <div class="spec-hashes">
+            <span title="你按過「記為已檢視」時這份文件的內容雜湊">採用基準 <code class="mono">${escapeHtml((r.baseline_hash || '—').slice(0, 12))}</code></span>
+            <span title="這次抓下來的內容雜湊">現在 <code class="mono">${escapeHtml((r.current_hash || '—').slice(0, 12))}</code></span>
+            ${r.checked_at ? `<span>檢查於 ${escapeHtml(String(r.checked_at).replace('T', ' ').slice(0, 16))}</span>` : ''}
+          </div>
           ${r.note ? `<div class="sub">${escapeHtml(r.note)}</div>` : ''}
         </div>`;
       })
@@ -592,6 +646,236 @@ function breakdownRows(counts) {
   ];
 }
 
+/* A small Markdown renderer.
+ *
+ * SKILL.md files are Markdown, and showing them as a wall of monospace made the
+ * one thing the catalogue exists for - reading what a skill actually says -
+ * the least pleasant part of the page. No dependency: the project ships no
+ * bundler and no npm, and the subset that matters here is small.
+ *
+ * Everything is escaped before any markup is emitted, so file content can never
+ * become page structure. Inline spans are rendered from already-escaped text.
+ */
+function mdInline(escaped) {
+  return escaped
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, href) =>
+      /^(https?:|#|\.|\/|~)/.test(href) ? `<a href="${href}" rel="noreferrer">${text}</a>` : m,
+    );
+}
+
+function renderMarkdown(src) {
+  const lines = String(src ?? '').split('\n');
+  const out = [];
+  let i = 0;
+  let listType = null;
+
+  const closeList = () => {
+    if (listType) {
+      out.push(`</${listType}>`);
+      listType = null;
+    }
+  };
+
+  while (i < lines.length) {
+    const raw = lines[i];
+    const line = escapeHtml(raw);
+
+    // Fenced code: emitted verbatim, never parsed as Markdown.
+    const fence = raw.match(/^\s*```(\w*)/);
+    if (fence) {
+      closeList();
+      const lang = escapeHtml(fence[1] || '');
+      const body = [];
+      i += 1;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) {
+        body.push(escapeHtml(lines[i]));
+        i += 1;
+      }
+      i += 1; // closing fence
+      out.push(`<pre class="md-code"${lang ? ` data-lang="${lang}"` : ''}><code>${body.join('\n')}</code></pre>`);
+      continue;
+    }
+
+    // Frontmatter, shown as itself rather than as a horizontal rule.
+    if (i === 0 && /^---\s*$/.test(raw)) {
+      const body = [];
+      i += 1;
+      while (i < lines.length && !/^---\s*$/.test(lines[i])) {
+        body.push(escapeHtml(lines[i]));
+        i += 1;
+      }
+      i += 1;
+      out.push(`<pre class="md-front"><code>${body.join('\n')}</code></pre>`);
+      continue;
+    }
+
+    const heading = raw.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      closeList();
+      const level = Math.min(heading[1].length + 1, 6); // h1 is the page's
+      out.push(`<h${level}>${mdInline(escapeHtml(heading[2]))}</h${level}>`);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*(?:[-*+]|\d+[.)])\s+/.test(raw)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(raw);
+      const want = ordered ? 'ol' : 'ul';
+      if (listType !== want) {
+        closeList();
+        out.push(`<${want}>`);
+        listType = want;
+      }
+      out.push(`<li>${mdInline(escapeHtml(raw.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')))}</li>`);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(raw)) {
+      closeList();
+      out.push(`<blockquote>${mdInline(escapeHtml(raw.replace(/^\s*>\s?/, '')))}</blockquote>`);
+      i += 1;
+      continue;
+    }
+
+    if (/^\s*\|/.test(raw)) {
+      closeList();
+      const rows = [];
+      while (i < lines.length && /^\s*\|/.test(lines[i])) {
+        rows.push(lines[i]);
+        i += 1;
+      }
+      const cells = (r) =>
+        r.trim().replace(/^\||\|$/g, '').split('|').map((c) => mdInline(escapeHtml(c.trim())));
+      const isRule = (r) => /^[\s|:-]+$/.test(r);
+      const head = rows.length > 1 && isRule(rows[1]) ? cells(rows[0]) : null;
+      const body = rows.slice(head ? 2 : 0).filter((r) => !isRule(r));
+      out.push(
+        '<table class="md-table">' +
+          (head ? `<thead><tr>${head.map((c) => `<th>${c}</th>`).join('')}</tr></thead>` : '') +
+          `<tbody>${body.map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>` +
+          '</table>',
+      );
+      continue;
+    }
+
+    if (/^\s*(?:---|\*\*\*|___)\s*$/.test(raw)) {
+      closeList();
+      out.push('<hr />');
+      i += 1;
+      continue;
+    }
+
+    if (!raw.trim()) {
+      closeList();
+      i += 1;
+      continue;
+    }
+
+    closeList();
+    // Consecutive non-blank lines are one paragraph, as Markdown intends.
+    const para = [mdInline(line)];
+    i += 1;
+    while (i < lines.length && lines[i].trim() && !/^(\s*[-*+>|#]|\s*\d+[.)]|\s*```)/.test(lines[i])) {
+      para.push(mdInline(escapeHtml(lines[i])));
+      i += 1;
+    }
+    out.push(`<p>${para.join(' ')}</p>`);
+  }
+  closeList();
+  return out.join('\n');
+}
+
+/* A restore point's contents, the way a commit is shown.
+ *
+ * "waive · 1 file" is not enough to decide whether to press 還原. The saved
+ * bytes are on disk, so the diff between them and what is live now is the
+ * honest answer to "what did this change", and it is written in the direction
+ * the button acts: current on the left, restored on the right.
+ */
+function backupDiffHtml(detail) {
+  const files = (detail && detail.files) || [];
+  if (!files.length) return '<span class="muted">這個還原點沒有檔案變更。</span>';
+  return files
+    .map((f) => {
+      const head = `<div class="diff-head">
+          <code class="mono">${escapeHtml(shortPath(f.path))}</code>
+          <span class="grow"></span>
+          ${f.added ? `<span class="diff-add">+${escapeHtml(f.added)}</span>` : ''}
+          ${f.removed ? `<span class="diff-del">−${escapeHtml(f.removed)}</span>` : ''}
+          ${!f.existed_before ? '<span class="tag">還原後會被刪除</span>' : ''}
+        </div>`;
+      if (f.unchanged) {
+        return `<div class="diff-file">${head}<div class="sub">和現在的內容相同，還原不會改變它。</div></div>`;
+      }
+      const body = f.diff
+        .split('\n')
+        .map((ln) => {
+          const cls = ln.startsWith('+++') || ln.startsWith('---')
+            ? 'diff-meta'
+            : ln.startsWith('@@')
+              ? 'diff-hunk'
+              : ln.startsWith('+')
+                ? 'diff-add-line'
+                : ln.startsWith('-')
+                  ? 'diff-del-line'
+                  : '';
+          return `<div class="${cls}">${escapeHtml(ln) || '&nbsp;'}</div>`;
+        })
+        .join('');
+      return `<div class="diff-file">${head}<div class="diff-body">${body}</div></div>`;
+    })
+    .join('');
+}
+
+/* Why most things cannot be checked for updates.
+ *
+ * The page showed one toolkit with a version and 49 plugins as "unknown", which
+ * reads as "only gstack comes from the cloud". It does not: everything here was
+ * downloaded from somewhere, but only some of it records *where from* in a form
+ * that can be compared. Grouping the reasons says which is which, and makes the
+ * gap actionable - a skill copied in by hand can be re-installed from a source
+ * you record, and then it becomes checkable.
+ */
+function updateGapsHtml(payload) {
+  const unknown = (payload && payload.unknown) || [];
+  if (!unknown.length) return '';
+  const byReason = new Map();
+  for (const u of unknown) {
+    const key = u.reason || '沒有記錄原因';
+    if (!byReason.has(key)) byReason.set(key, []);
+    byReason.get(key).push(u.plugin);
+  }
+  const rows = [...byReason.entries()].sort((a, b) => b[1].length - a[1].length);
+  const PLAIN = [
+    [/is not a GitHub source/, '這個 marketplace 不是 GitHub 來源，沒有可以比對的版本標記。'],
+    [/no comparable version or sha/, '遠端清單裡沒寫版本或 commit，無從比較新舊。'],
+  ];
+  const plainOf = (reason) => (PLAIN.find(([re]) => re.test(reason)) || [null, ''])[1];
+
+  return `<div class="gap-note">
+      <b>為什麼 ${escapeHtml(unknown.length)} 個比對不了</b>
+      <div class="sub">這些東西當然也是從網路裝的 —— 差別在於<b>有沒有留下可以比對的來源記錄</b>。
+        比對不了就標為未知，不會假裝它是最新的。</div>
+      <table class="tbl"><thead><tr><th>原因</th><th class="num">數量</th><th>對象</th></tr></thead><tbody>
+      ${rows
+        .map(
+          ([reason, names]) => `<tr>
+            <td>${escapeHtml(plainOf(reason) || reason)}</td>
+            <td class="num">${num(names.length)}</td>
+            <td><span class="detail-text mono">${escapeHtml(names.slice(0, 4).join('、'))}${
+              names.length > 4 ? ` …等 ${names.length} 個` : ''
+            }</span></td>
+          </tr>`,
+        )
+        .join('')}
+      </tbody></table>
+    </div>`;
+}
+
 /* Vendor findings, as the decisions they actually are.
  *
  * 133 line items about content an upgrade overwrites is not a backlog of 133
@@ -630,7 +914,12 @@ function vendorSourcesHtml(sources) {
 }
 
 export {
+  backupDiffHtml,
+  updateGapsHtml,
   breakdownRows,
+  setUsageCounts,
+  hitsFor,
+  renderMarkdown,
   vendorSourcesHtml,
   catalogueSections,
   rowActionsHtml,

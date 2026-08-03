@@ -4176,6 +4176,24 @@ class FilePeekRouteIsGated(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, exc.read().decode("utf-8")
 
+    def test_a_backup_id_cannot_walk_out_of_the_backup_directory(self):
+        """The id is pasted into a filesystem path, so it is the one field on
+        this route an attacker controls."""
+        import urllib.parse
+
+        token = self._token()
+        for bad in ("../../../etc", "foo/../../..", "..", "a/b"):
+            with self.subTest(id=bad):
+                status, body = self._get_route(
+                    f"/api/backup?id={urllib.parse.quote(bad)}",
+                    {"X-Studio-Token": token},
+                )
+                self.assertEqual(status, HTTPStatus.BAD_REQUEST, body[:120])
+
+    def test_an_empty_backup_id_is_refused(self):
+        status, _ = self._get_route("/api/backup?id=", {"X-Studio-Token": self._token()})
+        self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+
     def test_a_foreign_origin_without_a_token_is_refused(self):
         """The exact request that leaked the tokens: any page the browser has
         open can issue it, and nothing about it is authenticated."""
@@ -6486,3 +6504,137 @@ class EveryInventoryFieldSurvivesSerialisation(unittest.TestCase):
         from studio.scan import scan
 
         json.loads(to_json(scan()))
+
+
+class ARestorePointShowsWhatItWouldPutBack(unittest.TestCase):
+    """"waive · 1 file" is not enough to decide whether to press 還原.
+
+    The saved bytes are already in the slot, so the diff against what is live is
+    the honest answer to "what did this change". Written in the direction the
+    button acts: current on the left, restored on the right.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = os.path.join(self._tmp.name, "repo")
+        os.makedirs(self.repo)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _apply(self, before, after):
+        from studio import patch as patch_mod
+
+        path = os.path.join(self._tmp.name, "a.md")
+        if before is not None:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(before)
+        cs = patch_mod.ChangeSet(
+            name="t",
+            changes=[
+                patch_mod.Change(
+                    path=path,
+                    new_text=after,
+                    action="modify" if before is not None else "create",
+                )
+            ],
+        )
+        result = patch_mod.apply(cs, self.repo)
+        return path, os.path.basename(result["backup"])
+
+    def test_the_diff_shows_the_lines_that_would_come_back(self):
+        from studio import patch as patch_mod
+
+        path, bid = self._apply("one\ntwo\nthree\n", "one\nCHANGED\nthree\n")
+        detail = patch_mod.backup_diff(self.repo, bid)
+        (f,) = detail["files"]
+        self.assertIn("-CHANGED", f["diff"])
+        self.assertIn("+two", f["diff"])
+
+    def test_the_change_stats_are_measured_before_the_write(self):
+        """`stat()` reads the file to work out what changed, so computing it
+        after the write diffed the new content against itself: every restore
+        point recorded added=0, removed=0 however much had changed."""
+        from studio import patch as patch_mod
+
+        _, bid = self._apply("one\ntwo\nthree\n", "one\nCHANGED\nthree\nfour\n")
+        (f,) = patch_mod.backup_diff(self.repo, bid)["files"]
+        self.assertGreater(f["added"], 0)
+        self.assertGreater(f["removed"], 0)
+
+    def test_a_file_that_did_not_exist_is_marked_as_such(self):
+        """Restoring it means deleting it, which is not the same as editing it."""
+        from studio import patch as patch_mod
+
+        _, bid = self._apply(None, "brand new\n")
+        (f,) = patch_mod.backup_diff(self.repo, bid)["files"]
+        self.assertFalse(f["existed_before"])
+
+    def test_an_unknown_backup_id_raises_rather_than_inventing_a_diff(self):
+        from studio import patch as patch_mod
+
+        with self.assertRaises(FileNotFoundError):
+            patch_mod.backup_diff(self.repo, "no-such-backup")
+
+
+class TheUsageMapNeverTakesThePageDown(unittest.TestCase):
+    """It orders a list. Nothing about it justifies a 500 or a stalled page.
+
+    `usage.build(use_cache=True)` still walks the history to decide whether the
+    cache is current - 55 seconds against 27.9 GB - and putting that in the
+    first paint left the whole dashboard stuck on "載入中…" behind a number used
+    only for sorting. It reads the report the tool already wrote instead.
+    """
+
+    def setUp(self):
+        from studio import server
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.handler = server.Handler.__new__(server.Handler)
+        self.handler.repo_root = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, content):
+        d = os.path.join(self._tmp.name, "var")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "usage.json"), "w", encoding="utf-8") as fh:
+            fh.write(content)
+
+    def _run(self):
+        from studio import server
+
+        return server.Handler._usage_map(self.handler)
+
+    def test_counts_come_from_the_report_on_disk(self):
+        self._write(json.dumps({"tokens": {"a": 3}}))
+        self.assertEqual(self._run()["counts"], {"a": 3})
+
+    def test_it_does_not_rebuild_the_index(self):
+        """The whole point: a rebuild is a 55-second stall on first paint."""
+        from studio import server, usage as usage_mod
+
+        self._write(json.dumps({"tokens": {}}))
+        with mock.patch.object(usage_mod, "build", side_effect=AssertionError("rebuilt")):
+            server.Handler._usage_map(self.handler)
+
+    def test_a_missing_report_is_reported_not_raised(self):
+        r = self._run()
+        self.assertFalse(r["available"])
+        self.assertEqual(r["counts"], {})
+
+    def test_malformed_json_is_reported_not_raised(self):
+        self._write("{not json")
+        self.assertFalse(self._run()["available"])
+
+    def test_valid_json_of_the_wrong_shape_is_reported_not_raised(self):
+        """Parsing succeeds, so the decode guard misses it, and `.get` on a list
+        raised - a 500 from a file that only orders a list."""
+        self._write("[1, 2]")
+        self.assertFalse(self._run()["available"])
+
+    def test_a_non_dict_tokens_field_yields_no_counts(self):
+        self._write(json.dumps({"tokens": "nope"}))
+        r = self._run()
+        self.assertEqual(r["counts"], {})

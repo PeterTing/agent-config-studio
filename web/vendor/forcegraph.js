@@ -291,6 +291,13 @@ export function createForceGraph(svg, options = {}) {
       c.setAttribute('class', 'node');
       c.setAttribute('r', n.r);
       c.setAttribute('fill', cfg.color ? cfg.color(n) : 'currentColor');
+      // A node whose label lost the overlap contest is otherwise unidentifiable
+      // without zooming until it fits. A native <title> costs nothing, needs no
+      // script, and answers "what is this dot?" on hover for every node -
+      // including the ones that never get a drawn label.
+      const tip = document.createElementNS(NS, 'title');
+      tip.textContent = n.label;
+      c.append(tip);
       c.addEventListener('pointerdown', (ev) => startDrag(ev, n));
       c.addEventListener('click', (ev) => {
         ev.stopPropagation();
@@ -405,6 +412,33 @@ export function createForceGraph(svg, options = {}) {
       if (listeners[event]) listeners[event].push(fn);
     },
     relayoutLabels: scheduleLabels,
+    /* Scale and centre the view on everything currently rendered.
+     *
+     * Focusing on a neighbourhood leaves eight nodes in the middle of a canvas
+     * sized for two hundred, which wastes the space that made the view readable
+     * in the first place. Called after the layout settles, so it fits where the
+     * nodes ended up rather than where they started.
+     */
+    fit(padding = 40) {
+      if (!nodes.length) return;
+      const xs = nodes.map((n) => n.x);
+      const ys = nodes.map((n) => n.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const { w, h } = size();
+      if (!w || !h) return;
+      const bw = Math.max(maxX - minX, 1);
+      const bh = Math.max(maxY - minY, 1);
+      // Capped: a two-node neighbourhood should not fill the screen with two
+      // enormous circles.
+      view.k = Math.min(2.2, (w - padding * 2) / bw, (h - padding * 2) / bh);
+      view.x = w / 2 - ((minX + maxX) / 2) * view.k;
+      view.y = h / 2 - ((minY + maxY) / 2) * view.k;
+      applyTransform();
+      scheduleLabels();
+    },
     reset() {
       view.x = 0;
       view.y = 0;

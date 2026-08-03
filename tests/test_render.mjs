@@ -10,6 +10,10 @@
 
 import assert from 'node:assert/strict';
 import {
+  backupDiffHtml,
+  setUsageCounts,
+  hitsFor,
+  renderMarkdown,
   vendorSourcesHtml,
   catalogueSections,
   rowActionsHtml,
@@ -727,6 +731,141 @@ test('a source name cannot inject markup', () => {
 test('no vendor findings says so plainly', () => {
   assert.ok(vendorSourcesHtml([]).includes('沒有 vendor'));
   assert.ok(vendorSourcesHtml(undefined).includes('沒有 vendor'));
+});
+
+/* ---------------- usage ordering ---------------- */
+
+const SK = (name, extra = {}) => ({
+  name,
+  dir_name: name,
+  origin: 'local',
+  runtime: 'claude',
+  body_lines: 10,
+  path: `/p/${name}/SKILL.md`,
+  description: 'Does X. Use when Y.',
+  ...extra,
+});
+
+test('the catalogue leads with what you actually use', () => {
+  // Alphabetical put skills never touched above the ones run every day.
+  setUsageCounts({ zebra: 886, alpha: 0 });
+  const html = catalogueSections('skills', [SK('alpha'), SK('zebra')], { expandAll: true });
+  assert.ok(html.indexOf('zebra') < html.indexOf('alpha'), 'unused skill sorted above a used one');
+  setUsageCounts({});
+});
+
+test('skills nobody has used keep a stable alphabetical order', () => {
+  setUsageCounts({});
+  const html = catalogueSections('skills', [SK('beta'), SK('alpha')], { expandAll: true });
+  assert.ok(html.indexOf('alpha') < html.indexOf('beta'));
+});
+
+test('a card states how often it has been invoked', () => {
+  setUsageCounts({ thing: 12 });
+  assert.match(catalogueCard('skills', SK('thing')), /用過 12 次/);
+  setUsageCounts({});
+});
+
+test('with no usage index a card claims nothing', () => {
+  // 0 would read as "never used" when the truth is "not measured".
+  setUsageCounts({});
+  const html = catalogueCard('skills', SK('thing'));
+  assert.ok(!html.includes('沒叫過'), 'claimed unused without an index');
+  assert.ok(!html.includes('用過'));
+});
+
+test('a skill in the index with no calls is labelled, not left blank', () => {
+  setUsageCounts({ other: 3 });
+  assert.match(catalogueCard('skills', SK('thing')), /沒叫過/);
+  setUsageCounts({});
+});
+
+test('hitsFor matches on the directory name too', () => {
+  // The invocation is recorded under whichever name the log carried.
+  setUsageCounts({ 'my-dir': 7 });
+  assert.equal(hitsFor(SK('other', { dir_name: 'my-dir' })), 7);
+  setUsageCounts({});
+});
+
+/* ---------------- markdown ---------------- */
+
+test('markdown renders the structures a SKILL.md actually uses', () => {
+  const html = renderMarkdown('---\nname: x\n---\n\n# T\n\n- a\n\n| h |\n| --- |\n| c |\n');
+  assert.ok(html.includes('md-front'), 'frontmatter shown as itself');
+  assert.ok(html.includes('<h2>T</h2>'));
+  assert.ok(html.includes('<li>a</li>'));
+  assert.ok(html.includes('md-table'));
+});
+
+test('markdown never lets file content become page structure', () => {
+  const html = renderMarkdown('<img src=x onerror=alert(1)>\n\n[x](javascript:alert(1))');
+  assert.ok(!html.includes('<img'), `markup survived: ${html}`);
+  // The literal text survives escaped, which is fine - what must not happen is
+  // it becoming a link. Asserting on the substring would pass for the wrong
+  // reason the moment the renderer stopped emitting the text at all.
+  assert.ok(!/<a [^>]*javascript:/i.test(html), 'javascript: URL became a link');
+  assert.ok(html.includes('javascript:'), 'the text itself should still be shown');
+});
+
+test('a fenced block is never parsed as markdown', () => {
+  const html = renderMarkdown('```\n# not a heading\n- not a list\n```');
+  assert.ok(!html.includes('<h2>'), 'heading parsed inside a code fence');
+  assert.ok(html.includes('# not a heading'));
+});
+
+/* ---------------- restore point diffs ---------------- */
+
+const DETAIL = {
+  files: [
+    {
+      path: '/Users/x/.claude/skills/a/SKILL.md',
+      added: 2,
+      removed: 1,
+      existed_before: true,
+      unchanged: false,
+      diff: '--- a (現在)\n+++ a (還原後)\n@@ -1,3 +1,3 @@\n keep\n-new line\n+old line',
+    },
+  ],
+};
+
+test('a restore point shows which files it touches', () => {
+  // "waive · 1 file" is not enough to decide whether to press 還原.
+  const html = backupDiffHtml(DETAIL);
+  assert.ok(html.includes('SKILL.md'));
+  assert.ok(html.includes('+2') && html.includes('−1'));
+});
+
+test('added and removed lines are distinguishable', () => {
+  const html = backupDiffHtml(DETAIL);
+  assert.ok(html.includes('diff-add-line'), 'no added-line styling');
+  assert.ok(html.includes('diff-del-line'), 'no removed-line styling');
+});
+
+test('a file the restore would delete says so', () => {
+  const html = backupDiffHtml({
+    files: [{ path: '/p/new.md', added: 0, removed: 0, existed_before: false, diff: '-x' }],
+  });
+  assert.ok(html.includes('刪除'));
+});
+
+test('an unchanged file is called out rather than shown as an empty diff', () => {
+  const html = backupDiffHtml({
+    files: [{ path: '/p/same.md', added: 0, removed: 0, existed_before: true, unchanged: true, diff: '' }],
+  });
+  assert.ok(html.includes('相同'));
+  assert.ok(!html.includes('diff-body'));
+});
+
+test('diff content cannot inject markup', () => {
+  const html = backupDiffHtml({
+    files: [{ path: '/p/x.md', added: 1, removed: 0, existed_before: true, diff: '+<img src=x onerror=alert(1)>' }],
+  });
+  assert.ok(!html.includes('<img'));
+});
+
+test('an empty restore point says so', () => {
+  assert.ok(backupDiffHtml({ files: [] }).includes('沒有檔案變更'));
+  assert.ok(backupDiffHtml(undefined).includes('沒有檔案變更'));
 });
 
 /* ---------------- report ---------------- */

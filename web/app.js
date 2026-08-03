@@ -2,7 +2,11 @@
 
 import { createForceGraph } from '/static/vendor/forcegraph.js';
 import {
+  backupDiffHtml,
+  updateGapsHtml,
   breakdownRows,
+  setUsageCounts,
+  renderMarkdown,
   vendorSourcesHtml,
   catalogueSections,
   num,
@@ -615,7 +619,10 @@ function updateGraphStats() {
   const { nodes, edges } = lastCounts;
   let msg = `${nodes} 節點 / ${edges} 連線 · 紅圈＝有阻斷性問題`;
   if (labelStats) {
-    msg += ` · 標籤 ${labelStats.shown}/${labelStats.total}（重疊的自動隱藏，放大可看更多）`;
+    const hidden = labelStats.total - labelStats.shown;
+    msg += hidden
+      ? ` · 標籤 ${labelStats.shown}/${labelStats.total}，${hidden} 個因為會疊在一起被藏起來（滑鼠移到圓點上看名字，或放大）`
+      : ` · 標籤 ${labelStats.shown}/${labelStats.total} 全部顯示`;
   }
   if (nodes > 260) {
     msg += ' · 節點很多，建議用左側篩選或勾「只看有連線的」';
@@ -643,41 +650,129 @@ graph.on('labels', (s) => {
   updateGraphStats();
 });
 
+/* Focus: the whole graph is unreadable and a neighbourhood is not.
+ *
+ * 232 nodes in a force layout is a hairball - half the labels get suppressed
+ * because they collide, and zooming in only magnifies one part of the knot
+ * while pushing the rest off screen. The questions this page is actually asked
+ * are local ("what is this?", "what pulls this in?"), so clicking a node
+ * narrows the graph to that node and what it touches. Ten nodes lay out
+ * legibly, every label fits, and the detail panel shows the file itself.
+ */
+let focusId = null;
+let focusHops = 1;
+
+function neighbourhood(g, rootId, hops) {
+  const keep = new Set([rootId]);
+  let frontier = new Set([rootId]);
+  for (let d = 0; d < hops; d += 1) {
+    const next = new Set();
+    for (const e of g.edges) {
+      if (frontier.has(e.source) && !keep.has(e.target)) next.add(e.target);
+      if (frontier.has(e.target) && !keep.has(e.source)) next.add(e.source);
+    }
+    for (const id of next) keep.add(id);
+    frontier = next;
+    if (!next.size) break;
+  }
+  return keep;
+}
+
 graph.on('select', (n) => {
-  const el = $('detail');
   if (!n) {
-    el.innerHTML = '<div class="empty">點一個節點看它的關聯。滾輪縮放，拖曳平移。</div>';
+    focusId = null;
+    renderGraph();
+    renderNodeDetail(null);
     return;
   }
-  const g = state.graph || { edges: [] };
+  // Clicking is how you narrow: the full graph answers no question well, and
+  // the neighbourhood answers most of them.
+  focusId = n.id;
+  renderGraph();
+  renderNodeDetail(n);
+});
+
+async function renderNodeDetail(n) {
+  const el = $('detail');
+  if (!n) {
+    el.innerHTML =
+      '<div class="empty">點任一個圓點：圖會縮到它和它直接相關的東西，這裡顯示它的內容。</div>';
+    return;
+  }
+  const g = state.graph || { nodes: [], edges: [] };
   const rel = g.edges.filter((e) => e.source === n.id || e.target === n.id);
   const findings = ((state.health || {}).findings || []).filter((f) => f.path === n.path);
-  const fields = Object.entries(n)
-    .filter(([k, v]) => !['id', 'label', 'kind'].includes(k) && v !== null && v !== undefined && v !== '')
-    .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : v)}</dd>`)
-    .join('');
+  const hits = ((state.usage || {}).counts || {})[String(n.label).toLowerCase()];
+
   const relHtml = rel.length
     ? rel
         .map((e) => {
           const other = e.source === n.id ? e.target : e.source;
           const node = g.nodes.find((x) => x.id === other);
           const dir = e.source === n.id ? '→' : '←';
-          return `<li><span class="tag">${EDGE_LABELS[e.kind] || e.kind}</span> ${dir} ${escapeHtml(node ? node.label : other)}</li>`;
+          return `<li><span class="tag">${EDGE_LABELS[e.kind] || e.kind}</span> ${dir}
+            <button class="linkish" data-goto="${escapeHtml(other)}">${escapeHtml(node ? node.label : other)}</button></li>`;
         })
         .join('')
     : '<li class="muted">沒有連線</li>';
+
   el.innerHTML =
-    `<div style="font-weight:650;margin-bottom:6px">${escapeHtml(n.label)} <span class="tag">${n.kind}</span></div>` +
-    `<dl>${fields}</dl>` +
-    `<h3 style="margin:12px 0 4px;font-size:11px;text-transform:uppercase;color:var(--ink-3)">關聯 (${rel.length})</h3>` +
-    `<ul style="margin:0;padding-left:16px;font-size:12px">${relHtml}</ul>` +
-    (findings.length
-      ? `<h3 style="margin:12px 0 4px;font-size:11px;text-transform:uppercase;color:var(--ink-3)">此檔的問題 (${findings.length})</h3>` +
-        `<ul style="margin:0;padding-left:16px;font-size:12px">${findings
-          .map((f) => `<li><span class="tag ${f.severity}">${f.rule}</span> ${escapeHtml(f.title)}</li>`)
-          .join('')}</ul>`
-      : '');
-});
+    `<div class="detail-head">
+       <div><b>${escapeHtml(n.label)}</b> <span class="tag">${escapeHtml(n.kind)}</span>
+         ${n.runtime ? `<span class="tag">${escapeHtml(n.runtime)}</span>` : ''}
+         ${typeof hits === 'number' ? `<span class="tag ok">用過 ${num(hits)} 次</span>` : ''}</div>
+       <div class="detail-actions">
+         <label class="chk" title="也顯示鄰居的鄰居">
+           <input type="checkbox" id="d-hops" ${focusHops > 1 ? 'checked' : ''} /> 看兩層
+         </label>
+         <button id="d-clear">看全部</button>
+       </div>
+     </div>
+     ${n.path ? `<div class="mono muted" style="font-size:11px;margin:2px 0 8px">${escapeHtml(shortPath(n.path))}</div>` : ''}
+     ${
+       findings.length
+         ? `<div class="detail-findings">${findings
+             .map((f) => `<span class="tag ${f.severity}">${f.rule}</span> ${escapeHtml(f.title)}`)
+             .join('<br />')}</div>`
+         : ''
+     }
+     <h3 class="detail-h">關聯 (${rel.length})</h3>
+     <ul class="detail-rel">${relHtml}</ul>
+     <h3 class="detail-h">內容</h3>
+     <div id="d-body" class="md"><span class="running"><span class="spin"></span>讀取中…</span></div>`;
+
+  $('d-clear').onclick = () => {
+    focusId = null;
+    renderGraph();
+    graph.select(null);
+  };
+  $('d-hops').onchange = (ev) => {
+    focusHops = ev.target.checked ? 2 : 1;
+    renderGraph();
+  };
+  el.querySelectorAll('button[data-goto]').forEach((b) => {
+    b.onclick = () => {
+      const target = (state.graph.nodes || []).find((x) => x.id === b.dataset.goto);
+      if (target) {
+        focusId = target.id;
+        renderGraph();
+        renderNodeDetail(target);
+      }
+    };
+  });
+
+  const body = $('d-body');
+  if (!n.path) {
+    body.innerHTML = '<span class="muted">這個節點沒有對應的檔案。</span>';
+    return;
+  }
+  try {
+    const r = await api(`/api/file?path=${encodeURIComponent(shortPath(n.path))}`);
+    body.innerHTML = renderMarkdown(r.text);
+  } catch (e) {
+    body.innerHTML = `<span class="muted">讀不到：${escapeHtml(e.message)}</span>`;
+  }
+}
 
 function renderGraph() {
   const g = state.graph;
@@ -700,6 +795,15 @@ function renderGraph() {
     nodes = nodes.filter((n) => linked.has(n.id));
   }
 
+  if (focusId && g.nodes.some((n) => n.id === focusId)) {
+    const keep = neighbourhood(g, focusId, focusHops);
+    nodes = g.nodes.filter((n) => keep.has(n.id));
+    const kept = new Set(nodes.map((n) => n.id));
+    edges = g.edges.filter((e) => kept.has(e.source) && kept.has(e.target));
+  } else if (focusId) {
+    focusId = null; // the focused node was filtered away
+  }
+
   flaggedPaths = new Set(
     ((state.health || {}).findings || [])
       .filter((f) => !f.waived && f.owner === 'local' && f.severity !== 'minor')
@@ -707,6 +811,9 @@ function renderGraph() {
   );
 
   graph.render({ nodes, edges });
+  // Fit only when focused: the overview is meant to be panned and zoomed by
+  // hand, but a neighbourhood should arrive already framed.
+  if (focusId) setTimeout(() => graph.fit(), 450);
   lastCounts = { nodes: nodes.length, edges: edges.length };
   updateGraphStats();
 
@@ -763,6 +870,8 @@ function renderPlugins() {
 
   if (u) {
     $('u-stats').textContent = `${u.summary.updates_available} 個 plugin 與 ${u.summary.toolkit_updates_available} 個工具組有更新；${u.summary.unknown} 個無法比對（誠實標為未知，不當成最新）`;
+    const gaps = $('u-gaps');
+    if (gaps) gaps.innerHTML = updateGapsHtml(u);
   }
 
   // Updates run each package's own updater. The tool never reimplements one.
@@ -994,7 +1103,7 @@ function renderPeek(host, path, text) {
         <button id="peek-edit" type="button">編輯</button>
         <button class="dismiss" type="button">關閉</button>
       </div>
-      <pre id="peek-body">${escapeHtml(text)}</pre>
+      <div id="peek-body" class="md">${renderMarkdown(text)}</div>
     </div>`;
   host.querySelector('.dismiss').onclick = () => {
     host.hidden = true;
@@ -1003,6 +1112,7 @@ function renderPeek(host, path, text) {
 }
 
 function startEdit(host, path, text) {
+  // Editing gets the raw source: what you save is bytes, not rendered output.
   const body = $('peek-body');
   body.outerHTML = `<textarea id="peek-edit-area" spellcheck="false">${escapeHtml(text)}</textarea>`;
   const head = host.querySelector('.peek-head');
@@ -1147,7 +1257,12 @@ async function loadSync() {
     table(
       $('tbl-backups'),
       [
-        { label: '還原點', cls: 'mono', get: (b) => escapeHtml(b.id) },
+        {
+          label: '還原點',
+          cls: 'mono',
+          get: (b) =>
+            `<button class="linkish" data-diff="${escapeHtml(b.id)}" title="看這次改了什麼">${escapeHtml(b.id)}</button>`,
+        },
         { label: '變更集', get: (b) => escapeHtml(b.change_set || '') },
         { label: '檔案數', cls: 'num', get: (b) => (b.changes || []).length },
         { label: '說明', get: (b) => `<span class="detail-text">${escapeHtml(b.description || '')}</span>` },
@@ -1165,6 +1280,8 @@ async function loadSync() {
     // apply, and addEventListener stacked a new handler each time. One click
     // then fired N concurrent rollbacks of the same backup.
     $('tbl-backups').onclick = async (ev) => {
+      const show = ev.target.closest('button[data-diff]');
+      if (show) return showBackupDiff(show.dataset.diff, show);
       const btn = ev.target.closest('button[data-rollback]');
       if (!btn) return;
       const id = btn.dataset.rollback;
@@ -1300,13 +1417,19 @@ async function loadAllInner(fresh = false) {
     session = { token: null, allow_actions: false };
   }
   const q = fresh ? '?fresh=1' : '';
-  const [summary, health, inventory, history] = await Promise.all([
+  const [summary, health, inventory, history, usage] = await Promise.all([
     api(`/api/summary${q}`),
     api(`/api/health${q}`),
     api(`/api/inventory${q}`),
     api('/api/history'),
+    // Read from the cached index, so ordering the catalogue by what you use
+    // costs nothing. Never fatal: a page that will not draw because a count is
+    // missing is worse than a page drawn in an arbitrary order.
+    api('/api/usage-map').catch(() => ({ available: false, counts: {} })),
   ]);
   state.summary = summary;
+  state.usage = usage;
+  setUsageCounts((usage || {}).counts);
   state.health = health;
   state.inventory = inventory;
   state.history = history;
@@ -1325,6 +1448,7 @@ async function loadAllInner(fresh = false) {
   await loadFixes();
   await loadGraph($('g-expand').checked);
   loadSync();
+
 }
 
 $('btn-refresh').addEventListener('click', async () => {
@@ -1365,3 +1489,26 @@ $('btn-check').addEventListener('click', async () => {
 });
 
 loadAll().catch((e) => showError(e.message));
+
+/* Expand a restore point in place, like a commit in a file list. */
+async function showBackupDiff(id, btn) {
+  const row = btn.closest('tr');
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains('diff-row')) {
+    existing.remove();
+    return;
+  }
+  const tr = document.createElement('tr');
+  tr.className = 'diff-row';
+  const td = document.createElement('td');
+  td.colSpan = row.children.length;
+  td.innerHTML = '<span class="running"><span class="spin"></span>讀取差異…</span>';
+  tr.append(td);
+  row.after(tr);
+  try {
+    const d = await api(`/api/backup?id=${encodeURIComponent(id)}`);
+    td.innerHTML = backupDiffHtml(d);
+  } catch (e) {
+    td.innerHTML = `<span class="muted">讀不到：${escapeHtml(e.message)}</span>`;
+  }
+}

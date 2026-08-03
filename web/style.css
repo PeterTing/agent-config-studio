@@ -467,3 +467,126 @@ nav#tabs button:focus-visible { outline-offset: -2px; }
 .cat-group > summary::before { content: '▸'; color: var(--ink-3); }
 .cat-group[open] > summary::before { content: '▾'; }
 .cat-group > summary .muted { font-size: 12px; font-weight: normal; }
+
+/* Node detail: the panel is now the main way to read a file, not a metadata
+   dump, so it gets the room and the typography of a document. */
+.detail-head { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.detail-head > div:first-child { flex: 1; min-width: 0; }
+.detail-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.detail-h {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+.detail-rel { margin: 0; padding-left: 16px; font-size: 12px; }
+.detail-rel li { margin: 2px 0; }
+.detail-findings {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--bad);
+  background: var(--panel-2);
+  font-size: 12px;
+  border-radius: 0 6px 6px 0;
+}
+
+/* Rendered Markdown. Sized for reading, not for fitting the most on screen. */
+.md { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.md h2, .md h3, .md h4, .md h5, .md h6 { margin: 14px 0 6px; line-height: 1.3; }
+.md h2 { font-size: 15px; }
+.md h3 { font-size: 13.5px; }
+.md h4, .md h5, .md h6 { font-size: 12.5px; color: var(--ink-2); }
+.md p { margin: 8px 0; }
+.md ul, .md ol { margin: 8px 0; padding-left: 20px; }
+.md li { margin: 3px 0; }
+.md code {
+  font: 12px/1.5 var(--mono);
+  background: var(--panel-2);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.md pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.md pre code { background: none; padding: 0; font-size: 11.5px; }
+.md pre.md-front { border-left: 3px solid var(--accent); }
+.md blockquote {
+  margin: 8px 0;
+  padding: 4px 0 4px 10px;
+  border-left: 3px solid var(--line);
+  color: var(--ink-2);
+}
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.md a { color: var(--accent); }
+.md table.md-table { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: 100%; }
+.md table.md-table th, .md table.md-table td {
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.md table.md-table th { background: var(--panel-2); font-weight: 600; }
+
+/* A filter/action row sitting directly under a panel had no gap, so the buttons
+   read as part of the explanation above them rather than as the controls that
+   act on it. */
+.panel + .filters { margin-top: 14px; }
+.filters + .panel { margin-top: 10px; }
+
+.spec-how {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+.spec-hashes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+.spec-hashes code { font-size: 11px; }
+
+/* Restore-point diffs, read the way a commit is read. */
+tr.diff-row > td { padding: 10px 12px; background: var(--panel-2); }
+.diff-file { margin-bottom: 12px; }
+.diff-file:last-child { margin-bottom: 0; }
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px 8px 0 0;
+  font-size: 12px;
+}
+.diff-add { color: var(--ok); font-weight: 600; }
+.diff-del { color: var(--bad); font-weight: 600; }
+.diff-body {
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  overflow-x: auto;
+  font: 11.5px/1.5 var(--mono);
+  background: var(--panel);
+}
+.diff-body > div { padding: 0 10px; white-space: pre; }
+.diff-meta { color: var(--ink-3); }
+.diff-hunk { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.diff-add-line { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.diff-del-line { background: color-mix(in srgb, var(--bad) 12%, transparent); }
+
+.gap-note .sub { margin: 4px 0 10px; }
